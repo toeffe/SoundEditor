@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark light" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
+  <title>Audio Editor</title>
+  <script>
+    (function () {
+      var saved = localStorage.getItem('theme');
+      var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.setAttribute('data-theme', theme);
+    })();
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="brand">
+        <img class="brand-mark" src="/favicon.svg" width="32" height="32" alt="" />
+        <h1>Audio Editor<span class="brand-sub">Toeffe's Multi-track Editor · Convert · export</span></h1>
+      </div>
+      <div class="controls">
+        <button id="undo-btn" title="Ctrl+Z" aria-label="Undo" disabled>↶ Undo</button>
+        <button id="redo-btn" title="Ctrl+Y" aria-label="Redo" disabled>↷ Redo</button>
+        <button id="play-btn" aria-label="Play">▶ Play</button>
+        <button id="stop-btn" aria-label="Stop">⏹ Stop</button>
+        <button id="record-btn" aria-label="Record" title="R" disabled>⏺ Record</button>
+        <label for="zoom">Zoom <input type="range" id="zoom" min="20" max="1000" value="100" /></label>
+        <label for="master-gain">Master <input type="range" id="master-gain" min="0" max="200" value="100" /></label>
+        <span id="time-display" role="timer" aria-label="Playback position">0:00.00</span>
+        <button type="button" id="edit-menu-btn" aria-haspopup="menu" aria-expanded="false" title="Edit actions (also on right-click)">
+          Edit ▾
+        </button>
+        <div class="toolbar-actions" hidden>
+          <button id="split-btn" title="S">Split</button>
+          <button id="merge-btn">Merge</button>
+          <button id="crossfade-btn" title="Create 50ms overlap">Crossfade</button>
+          <button id="delete-btn" title="Delete">Delete</button>
+          <button id="dup-btn">Duplicate</button>
+          <button id="clear-btn" title="Clear project">Clear</button>
+          <button id="env-btn" title="E">Envelope</button>
+          <button id="spec-toggle">Spectrogram</button>
+        </div>
+        <div class="export-wrap">
+          <button
+            type="button"
+            id="export-menu-btn"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="export-panel"
+            title="Export mix"
+          >
+            Export ▾
+          </button>
+          <div id="export-panel" class="export-popover" hidden role="dialog" aria-label="Export options">
+            <div class="export-popover__row">
+              <label for="format">Format</label>
+              <select id="format">
+                <option value="wav">WAV</option>
+                <option value="mp3">MP3</option>
+                <option value="flac">FLAC</option>
+                <option value="ogg">OGG Vorbis</option>
+              </select>
+            </div>
+            <div class="export-popover__row">
+              <label for="bitrate">Bitrate</label>
+              <select id="bitrate">
+                <option value="128">128 kbps</option>
+                <option value="192" selected>192 kbps</option>
+                <option value="256">256 kbps</option>
+                <option value="320">320 kbps</option>
+              </select>
+            </div>
+            <div class="export-popover__row">
+              <label for="meta-title">Title</label>
+              <input type="text" id="meta-title" placeholder="Optional" />
+            </div>
+            <div class="export-popover__row">
+              <label for="meta-artist">Artist</label>
+              <input type="text" id="meta-artist" placeholder="Optional" />
+            </div>
+            <button type="button" id="export-btn" class="export-popover__go">Export file</button>
+          </div>
+        </div>
+        <button
+          id="theme-toggle"
+          class="theme-toggle"
+          type="button"
+          aria-pressed="false"
+          aria-label="Toggle light and dark mode"
+        >
+          <span class="label" id="theme-toggle-label">Night</span>
+          <span class="theme-toggle__track"><span class="theme-toggle__thumb"></span></span>
+        </button>
+      </div>
+    </header>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <div class="toolbar">
+      <label for="clip-gain">Clip gain <input type="range" id="clip-gain" min="0" max="250" value="100" disabled /></label>
+      <label for="clip-rate">Speed <input type="number" id="clip-rate" min="0.25" max="4" step="0.05" value="1" disabled title="Pitch follows" /></label>
+      <label for="fade-in">Fade in <input type="number" id="fade-in" min="0" step="0.01" value="0" disabled /></label>
+      <label for="fade-out">Fade out <input type="number" id="fade-out" min="0" step="0.01" value="0" disabled /></label>
+      <span id="clip-info" class="hint" aria-live="polite">No clip selected</span>
+    </div>
+
+    <div id="timeline-row" class="timeline-row"></div>
+
+    <p class="hint app-hint">
+      Drop onto a track · Drag fade handles on a selected clip · Shift-drag to mark · Right-click or Edit menu · Space play
+    </p>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
