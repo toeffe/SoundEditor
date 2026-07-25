@@ -16,8 +16,12 @@ type DragType =
   | 'select';
 
 export const RULER_HEIGHT = 28;
+/** Minimum / default lane height. */
 export const LANE_HEIGHT = 88;
-export const ADD_STRIP_HEIGHT = 36;
+/** Cap so a few tracks fill the window without a giant empty lane. */
+export const MAX_LANE_HEIGHT = 200;
+/** Fixed height of the "+ Track" strip (clickable, not viewport-filling). */
+export const ADD_STRIP_HEIGHT = 48;
 export const TRACK_HEADER_WIDTH = 148;
 
 interface ThemeColors {
@@ -68,6 +72,9 @@ export class Timeline {
   mode: 'normal' | 'envelope' = 'normal';
   showSpectrogram = false;
   selection: TimeSelection | null = null;
+
+  /** Per-track lane height; grows with available viewport (capped). */
+  private laneHeight = LANE_HEIGHT;
 
   private colors: ThemeColors = readThemeColors();
   private scrollLeft = 0;
@@ -275,7 +282,7 @@ export class Timeline {
 
   private contentHeight(): number {
     const n = this.project?.tracks.length ?? 0;
-    const lanes = Math.max(1, n) * LANE_HEIGHT;
+    const lanes = Math.max(1, n) * this.laneHeight;
     return RULER_HEIGHT + lanes + ADD_STRIP_HEIGHT;
   }
 
@@ -286,7 +293,17 @@ export class Timeline {
   private resize() {
     const wrap = this.scroller();
     const viewW = Math.max(100, wrap.clientWidth);
-    const h = this.contentHeight();
+    const viewH = Math.max(160, wrap.clientHeight || 0);
+    const trackCount = Math.max(1, this.project?.tracks.length ?? 0);
+
+    // Stretch lanes into leftover space (capped); keep "+ Track" a fixed strip.
+    const roomForLanes = Math.max(LANE_HEIGHT, viewH - RULER_HEIGHT - ADD_STRIP_HEIGHT);
+    this.laneHeight = Math.min(
+      MAX_LANE_HEIGHT,
+      Math.max(LANE_HEIGHT, Math.floor(roomForLanes / trackCount))
+    );
+
+    const h = Math.max(this.contentHeight(), viewH);
     const dpr = window.devicePixelRatio || 1;
 
     this.spacer.style.width = this.contentWidth() + 'px';
@@ -306,14 +323,14 @@ export class Timeline {
   }
 
   private trackY(orderIndex: number): number {
-    return RULER_HEIGHT + orderIndex * LANE_HEIGHT;
+    return RULER_HEIGHT + orderIndex * this.laneHeight;
   }
 
   private trackIndexAtY(y: number): number {
     if (y < RULER_HEIGHT) return -1;
     const n = this.project?.tracks.length ?? 0;
     if (n === 0) return -1;
-    const idx = Math.floor((y - RULER_HEIGHT) / LANE_HEIGHT);
+    const idx = Math.floor((y - RULER_HEIGHT) / this.laneHeight);
     if (idx < 0) return -1;
     if (idx >= n) return -1; // add-strip / below
     return idx;
@@ -324,7 +341,7 @@ export class Timeline {
     if (y < RULER_HEIGHT) return null;
     const n = this.project?.tracks.length ?? 0;
     if (n === 0) return -1;
-    const idx = Math.floor((y - RULER_HEIGHT) / LANE_HEIGHT);
+    const idx = Math.floor((y - RULER_HEIGHT) / this.laneHeight);
     if (idx < 0) return null;
     if (idx >= n) return -1;
     return idx;
@@ -376,21 +393,21 @@ export class Timeline {
     if (tracks.length === 0) {
       const y = RULER_HEIGHT;
       ctx.fillStyle = withAlpha(c.clip, 0.25);
-      ctx.fillRect(0, y, w, LANE_HEIGHT);
+      ctx.fillRect(0, y, w, this.laneHeight);
       ctx.strokeStyle = c.grid;
       ctx.setLineDash([6, 4]);
-      ctx.strokeRect(4.5, y + 4.5, w - 9, LANE_HEIGHT - 9);
+      ctx.strokeRect(4.5, y + 4.5, w - 9, this.laneHeight - 9);
       ctx.setLineDash([]);
       ctx.fillStyle = c.gridText;
       ctx.font = '12px sans-serif';
-      ctx.fillText('Drop audio here to create the first track', 16, y + LANE_HEIGHT / 2 + 4);
+      ctx.fillText('Drop audio here to create the first track', 16, y + this.laneHeight / 2 + 4);
     } else {
       tracks.forEach((_track, i) => {
         const y = this.trackY(i);
         ctx.fillStyle = i % 2 === 0 ? withAlpha(c.clip, 0.35) : withAlpha(c.bg, 0.5);
-        ctx.fillRect(0, y, w, LANE_HEIGHT);
+        ctx.fillRect(0, y, w, this.laneHeight);
         ctx.strokeStyle = c.grid;
-        ctx.strokeRect(0, y + 0.5, w, LANE_HEIGHT - 1);
+        ctx.strokeRect(0, y + 0.5, w, this.laneHeight - 1);
       });
     }
 
@@ -398,7 +415,7 @@ export class Timeline {
       const ti = tracks.findIndex((t) => t.id === clip.trackId);
       if (ti < 0) continue;
       const y = this.trackY(ti);
-      this.drawClip(clip, y, LANE_HEIGHT - 4, scroll);
+      this.drawClip(clip, y, this.laneHeight - 4, scroll);
     }
 
     // Crossfade overlays
@@ -414,19 +431,19 @@ export class Timeline {
         const x1 = o.start * this.zoom - scroll;
         const x2 = o.end * this.zoom - scroll;
         ctx.fillStyle = withAlpha(c.envelope, 0.25);
-        ctx.fillRect(x1, y + 2, x2 - x1, LANE_HEIGHT - 4);
+        ctx.fillRect(x1, y + 2, x2 - x1, this.laneHeight - 4);
         ctx.strokeStyle = c.envelope;
         ctx.beginPath();
         ctx.moveTo(x1, y + 2);
-        ctx.lineTo(x2, y + LANE_HEIGHT - 2);
-        ctx.moveTo(x1, y + LANE_HEIGHT - 2);
+        ctx.lineTo(x2, y + this.laneHeight - 2);
+        ctx.moveTo(x1, y + this.laneHeight - 2);
         ctx.lineTo(x2, y + 2);
         ctx.stroke();
       }
     }
 
     // "+ Track" drop strip
-    const addY = RULER_HEIGHT + Math.max(1, tracks.length) * LANE_HEIGHT;
+    const addY = RULER_HEIGHT + Math.max(1, tracks.length) * this.laneHeight;
     ctx.fillStyle = this.dropTarget === -1 ? withAlpha(c.clipBorderSelected, 0.2) : withAlpha(c.grid, 0.35);
     ctx.fillRect(0, addY, w, ADD_STRIP_HEIGHT);
     ctx.strokeStyle = c.grid;
@@ -441,14 +458,14 @@ export class Timeline {
     if (this.dropTarget !== null && this.dropTarget >= 0) {
       const y = this.trackY(this.dropTarget);
       ctx.fillStyle = withAlpha(c.clipBorderSelected, 0.22);
-      ctx.fillRect(0, y, w, LANE_HEIGHT);
+      ctx.fillRect(0, y, w, this.laneHeight);
       ctx.strokeStyle = c.clipBorderSelected;
       ctx.lineWidth = 2;
-      ctx.strokeRect(1, y + 1, w - 2, LANE_HEIGHT - 2);
+      ctx.strokeRect(1, y + 1, w - 2, this.laneHeight - 2);
       ctx.lineWidth = 1;
     } else if (this.dropTarget === -1 && tracks.length === 0) {
       ctx.fillStyle = withAlpha(c.clipBorderSelected, 0.22);
-      ctx.fillRect(0, RULER_HEIGHT, w, LANE_HEIGHT);
+      ctx.fillRect(0, RULER_HEIGHT, w, this.laneHeight);
     }
 
     if (this.selection) {
@@ -621,7 +638,7 @@ export class Timeline {
     for (const track of tracks) {
       const row = document.createElement('div');
       row.className = 'track-header' + (this.project.armedTrackId === track.id ? ' armed' : '');
-      row.style.height = LANE_HEIGHT + 'px';
+      row.style.height = this.laneHeight + 'px';
       row.dataset.trackId = track.id;
 
       row.addEventListener('dragover', (e) => {
@@ -723,7 +740,7 @@ export class Timeline {
     if (tracks.length === 0) {
       const spacer = document.createElement('div');
       spacer.className = 'track-header track-header--placeholder';
-      spacer.style.height = LANE_HEIGHT + 'px';
+      spacer.style.height = this.laneHeight + 'px';
       spacer.textContent = 'No tracks';
       this.headersEl.appendChild(spacer);
     }
@@ -847,7 +864,7 @@ export class Timeline {
         const env = [...clip.envelope].sort((a, b) => a.time - b.time);
         for (let i = 0; i < env.length; i++) {
           const px = x + env[i].time * this.zoom;
-          const py = laneTop + 2 + envelopeGainToY(env[i].gain, LANE_HEIGHT - 4);
+          const py = laneTop + 2 + envelopeGainToY(env[i].gain, this.laneHeight - 4);
           if (Math.abs(mx - px) < 8 && Math.abs(my - py) < 8) {
             return { type: 'env-point', clip, pointIdx: i };
           }
@@ -855,7 +872,7 @@ export class Timeline {
         if (time >= clip.start && time <= clip.start + clipDuration(clip)) {
           const local = time - clip.start;
           const g = interpolateEnvelope(clip.envelope, local, 1);
-          const ey = laneTop + 2 + envelopeGainToY(g, LANE_HEIGHT - 4);
+          const ey = laneTop + 2 + envelopeGainToY(g, this.laneHeight - 4);
           if (Math.abs(my - ey) < 10) {
             return { type: 'env-point', clip, pointIdx: -1 };
           }
@@ -1093,7 +1110,7 @@ export class Timeline {
         const local = Math.max(0, Math.min(clipDuration(clip), time - clip.start));
         env[idx] = {
           time: local,
-          gain: envelopeYToGain(my - laneTop - 2, LANE_HEIGHT - 4),
+          gain: envelopeYToGain(my - laneTop - 2, this.laneHeight - 4),
         };
         env.sort((a, b) => a.time - b.time);
         this.dragPointIdx = env.findIndex((p) => Math.abs(p.time - local) < 1e-4);
