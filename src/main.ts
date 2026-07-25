@@ -37,11 +37,8 @@ const dupBtn = document.getElementById('dup-btn')!;
 const clearBtn = document.getElementById('clear-btn')!;
 const envBtn = document.getElementById('env-btn')!;
 const specToggle = document.getElementById('spec-toggle')!;
-const zoomInput = document.getElementById('zoom') as HTMLInputElement;
 const masterGainInput = document.getElementById('master-gain') as HTMLInputElement;
-const fadeInInput = document.getElementById('fade-in') as HTMLInputElement;
-const fadeOutInput = document.getElementById('fade-out') as HTMLInputElement;
-const clipGainInput = document.getElementById('clip-gain') as HTMLInputElement;
+const masterGainValue = document.getElementById('master-gain-value')!;
 const clipRateInput = document.getElementById('clip-rate') as HTMLInputElement;
 const clipInfo = document.getElementById('clip-info')!;
 const timeDisplay = document.getElementById('time-display')!;
@@ -60,26 +57,22 @@ function refresh() {
   recordBtn.disabled = !project.armedTrackId && !recorder.isRecording;
   editMenuBtn.classList.toggle('active', timeline.mode === 'envelope');
 
+  if (!masterGainGesture) {
+    masterGainInput.value = String(Math.round(project.state.masterGain * 100));
+    updateMasterReadout();
+  }
+
   const clip = timeline.selectedClipId
     ? project.clips.find((c) => c.id === timeline.selectedClipId)
     : null;
 
   if (clip) {
-    clipGainInput.disabled = false;
-    fadeInInput.disabled = false;
-    fadeOutInput.disabled = false;
     clipRateInput.disabled = false;
-    clipGainInput.value = String(Math.round(clip.gain * 100));
-    fadeInInput.value = String(clip.fadeIn);
-    fadeOutInput.value = String(clip.fadeOut);
     clipRateInput.value = String(clip.rate);
     const dur = clipDuration(clip);
     const asset = library.get(clip.assetId);
     clipInfo.textContent = `${asset?.name ?? 'Clip'} @ ${clip.start.toFixed(2)}s · ${dur.toFixed(2)}s · ${clip.rate.toFixed(2)}×`;
   } else {
-    clipGainInput.disabled = true;
-    fadeInInput.disabled = true;
-    fadeOutInput.disabled = true;
     clipRateInput.disabled = true;
     clipInfo.textContent = project.tracks.length
       ? 'No clip selected'
@@ -708,33 +701,50 @@ specToggle.addEventListener('click', () => {
   specToggle.textContent = on ? 'Waveform' : 'Spectrogram';
 });
 
-clipGainInput.addEventListener('change', () => {
+let rateGesture = false;
+function applySelectedClipRate(commit: boolean) {
   if (!timeline.selectedClipId) return;
-  project.updateClip(timeline.selectedClipId, {
-    gain: parseInt(clipGainInput.value, 10) / 100,
-  });
-});
+  const raw = parseFloat(clipRateInput.value);
+  if (!Number.isFinite(raw)) return;
+  const rate = Math.max(0.25, Math.min(4, raw));
 
-fadeInInput.addEventListener('change', () => {
-  if (!timeline.selectedClipId) return;
-  project.updateClip(timeline.selectedClipId, {
-    fadeIn: Math.max(0, parseFloat(fadeInInput.value) || 0),
-  });
-});
+  if (commit) {
+    if (!rateGesture) project.beginEdit();
+    project.mutateClip(timeline.selectedClipId, { rate });
+    project.commitClip(timeline.selectedClipId);
+    rateGesture = false;
+  } else {
+    if (!rateGesture) {
+      project.beginEdit();
+      rateGesture = true;
+    }
+    project.mutateClip(timeline.selectedClipId, { rate });
+  }
 
-fadeOutInput.addEventListener('change', () => {
-  if (!timeline.selectedClipId) return;
-  project.updateClip(timeline.selectedClipId, {
-    fadeOut: Math.max(0, parseFloat(fadeOutInput.value) || 0),
-  });
-});
-
-clipRateInput.addEventListener('change', () => {
-  if (!timeline.selectedClipId) return;
-  const rate = Math.max(0.25, Math.min(4, parseFloat(clipRateInput.value) || 1));
-  project.updateClip(timeline.selectedClipId, { rate });
   clipRateInput.value = String(rate);
+  const clip = project.clips.find((c) => c.id === timeline.selectedClipId);
+  if (clip) {
+    const asset = library.get(clip.assetId);
+    const dur = clipDuration(clip);
+    clipInfo.textContent = `${asset?.name ?? 'Clip'} @ ${clip.start.toFixed(2)}s · ${dur.toFixed(2)}s · ${rate.toFixed(2)}×`;
+  }
+  timeline.draw();
+  if (engine.isPlaying) {
+    engine.seek(project, timeline.playhead);
+  }
+}
+
+clipRateInput.addEventListener('pointerdown', () => {
+  if (!timeline.selectedClipId) return;
+  project.beginEdit();
+  rateGesture = true;
 });
+clipRateInput.addEventListener('input', () => applySelectedClipRate(false));
+clipRateInput.addEventListener('change', () => applySelectedClipRate(true));
+
+function updateMasterReadout() {
+  masterGainValue.textContent = masterGainInput.value;
+}
 
 let masterGainGesture = false;
 masterGainInput.addEventListener('pointerdown', () => {
@@ -742,6 +752,7 @@ masterGainInput.addEventListener('pointerdown', () => {
   masterGainGesture = true;
 });
 masterGainInput.addEventListener('input', () => {
+  updateMasterReadout();
   const g = parseInt(masterGainInput.value, 10) / 100;
   if (!masterGainGesture) {
     project.setMasterGain(g, true);
@@ -753,11 +764,9 @@ masterGainInput.addEventListener('input', () => {
 });
 masterGainInput.addEventListener('change', () => {
   masterGainGesture = false;
+  updateMasterReadout();
 });
-
-zoomInput.addEventListener('input', () => {
-  timeline.setZoom(parseInt(zoomInput.value, 10));
-});
+updateMasterReadout();
 
 window.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;

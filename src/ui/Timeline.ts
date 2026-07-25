@@ -150,6 +150,18 @@ export class Timeline {
       this.scrollLeft = wrapper.scrollLeft;
       this.draw();
     });
+    wrapper.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        const rect = this.canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left + wrapper.scrollLeft;
+        const anchorTime = mx / this.zoom;
+        const factor = e.deltaY > 0 ? 0.9 : 1.1;
+        this.setZoom(this.zoom * factor, anchorTime);
+      },
+      { passive: false }
+    );
     window.addEventListener('resize', () => {
       this.resize();
       this.draw();
@@ -202,10 +214,20 @@ export class Timeline {
     }
   }
 
-  setZoom(z: number) {
-    this.zoom = Math.max(10, Math.min(2000, z));
+  setZoom(z: number, anchorTime?: number) {
+    const wrap = this.scroller();
+    const oldZoom = this.zoom;
+    this.zoom = Math.max(20, Math.min(1000, z));
     this.refreshPeaks();
     this.resize();
+
+    if (anchorTime !== undefined && Number.isFinite(anchorTime)) {
+      const viewX = anchorTime * oldZoom - this.scrollLeft;
+      const nextScroll = Math.max(0, anchorTime * this.zoom - viewX);
+      wrap.scrollLeft = nextScroll;
+      this.scrollLeft = wrap.scrollLeft;
+    }
+
     this.draw();
   }
 

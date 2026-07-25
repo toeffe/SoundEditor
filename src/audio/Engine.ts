@@ -9,6 +9,7 @@ export class Engine {
   private _ctx: AudioContext | null = null;
   private library: AssetLibrary | null = null;
   private sources: AudioBufferSourceNode[] = [];
+  private clipSources = new Map<string, AudioBufferSourceNode>();
   private nodes: AudioNode[] = [];
   private trackGains = new Map<string, GainNode>();
   private master: GainNode | null = null;
@@ -171,6 +172,7 @@ export class Engine {
     const srcDur = Math.min(sourceDuration(clip) - skippedTimeline * rate, playDuration * rate);
     source.start(t0, sourceOffset, Math.max(0.001, srcDur));
     this.sources.push(source);
+    this.clipSources.set(clip.id, source);
     this.nodes.push(gain);
   }
 
@@ -196,6 +198,14 @@ export class Engine {
       }
       return Math.max(0, Math.min(1, m));
     };
+  }
+
+  /** Live playback-rate tweak for a playing clip (pitch follows). */
+  setClipRate(clipId: string, rate: number) {
+    const source = this.clipSources.get(clipId);
+    if (!source) return;
+    const r = Math.max(0.25, Math.min(4, rate));
+    source.playbackRate.setValueAtTime(r, this.ctx.currentTime);
   }
 
   seek(project: Project, time: number) {
@@ -224,6 +234,7 @@ export class Engine {
       this.master = null;
     }
     this.sources = [];
+    this.clipSources.clear();
     this.nodes = [];
     this.trackGains.clear();
     cancelAnimationFrame(this.raf);

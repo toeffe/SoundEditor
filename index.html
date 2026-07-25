@@ -28,8 +28,11 @@
         <button id="play-btn" aria-label="Play">▶ Play</button>
         <button id="stop-btn" aria-label="Stop">⏹ Stop</button>
         <button id="record-btn" aria-label="Record" title="R" disabled>⏺ Record</button>
-        <label for="zoom">Zoom <input type="range" id="zoom" min="20" max="1000" value="100" /></label>
-        <label for="master-gain">Master <input type="range" id="master-gain" min="0" max="200" value="100" /></label>
+        <label class="master-control" for="master-gain" title="Master volume">
+          Master
+          <input type="range" id="master-gain" min="0" max="100" value="100" />
+          <span id="master-gain-value" class="gain-readout" aria-live="polite">100</span>
+        </label>
         <span id="time-display" role="timer" aria-label="Playback position">0:00.00</span>
         <button type="button" id="edit-menu-btn" aria-haspopup="menu" aria-expanded="false" title="Edit actions (also on right-click)">
           Edit ▾
@@ -101,18 +104,15 @@
     <p id="status" class="status" role="status" aria-live="polite"></p>
 
     <div class="toolbar">
-      <label for="clip-gain">Clip gain <input type="range" id="clip-gain" min="0" max="250" value="100" disabled /></label>
       <label for="clip-rate">Speed <input type="number" id="clip-rate" min="0.25" max="4" step="0.05" value="1" disabled title="Pitch follows" /></label>
-      <label for="fade-in">Fade in <input type="number" id="fade-in" min="0" step="0.01" value="0" disabled /></label>
-      <label for="fade-out">Fade out <input type="number" id="fade-out" min="0" step="0.01" value="0" disabled /></label>
       <span id="clip-info" class="hint" aria-live="polite">No clip selected</span>
     </div>
 
     <div id="timeline-row" class="timeline-row"></div>
 
     <p class="hint app-hint">
-      Select a clip · Click the volume line to add dots · Drag up/down for gain · Double-click a dot to remove ·
-      Edges trim · Shift-drag to mark · Space play
+      Scroll to zoom · Select a clip · Click the volume line to add dots · Drag dots for gain ·
+      Track faders on the left · Double-click a dot to remove · Space play
     </p>
   </div>
   <script type="module" src="/src/main.ts"></script>

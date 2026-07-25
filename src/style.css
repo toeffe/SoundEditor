@@ -242,6 +242,19 @@ input[type="number"] {
   font-family: var(--font-mono);
 }
 
+.gain-readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  min-width: 2rem;
+  text-align: right;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.master-control {
+  gap: 0.35rem;
+}
+
 #time-display {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
