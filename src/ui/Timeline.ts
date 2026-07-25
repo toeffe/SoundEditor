@@ -9,8 +9,6 @@ type DragType =
   | 'move'
   | 'resize-l'
   | 'resize-r'
-  | 'fade-in'
-  | 'fade-out'
   | 'env-point'
   | 'seek'
   | 'select';
@@ -418,7 +416,7 @@ export class Timeline {
       this.drawClip(clip, y, this.laneHeight - 4, scroll);
     }
 
-    // Crossfade overlays
+    // Soft overlap highlight (no X / diamond)
     for (let i = 0; i < this.project.clips.length; i++) {
       for (let j = i + 1; j < this.project.clips.length; j++) {
         const a = this.project.clips[i];
@@ -430,15 +428,8 @@ export class Timeline {
         const y = this.trackY(ti);
         const x1 = o.start * this.zoom - scroll;
         const x2 = o.end * this.zoom - scroll;
-        ctx.fillStyle = withAlpha(c.envelope, 0.25);
+        ctx.fillStyle = withAlpha(c.envelope, 0.2);
         ctx.fillRect(x1, y + 2, x2 - x1, this.laneHeight - 4);
-        ctx.strokeStyle = c.envelope;
-        ctx.beginPath();
-        ctx.moveTo(x1, y + 2);
-        ctx.lineTo(x2, y + this.laneHeight - 2);
-        ctx.moveTo(x1, y + this.laneHeight - 2);
-        ctx.lineTo(x2, y + 2);
-        ctx.stroke();
       }
     }
 
@@ -553,8 +544,8 @@ export class Timeline {
       ctx.restore();
     }
 
-    const fadeFill = withAlpha(c.gridText, selected ? 0.28 : 0.18);
-    const fadeStroke = withAlpha(c.envelope, selected ? 0.95 : 0.55);
+    // Subtle fade shading from numeric fadeIn/fadeOut (optional; envelope is the main tool)
+    const fadeFill = withAlpha(c.gridText, selected ? 0.2 : 0.12);
     if (clip.fadeIn > 0) {
       const fw = clip.fadeIn * this.zoom;
       ctx.fillStyle = fadeFill;
@@ -563,12 +554,6 @@ export class Timeline {
       ctx.lineTo(x, y + 2);
       ctx.lineTo(x + fw, y + 2 + h);
       ctx.fill();
-      ctx.strokeStyle = fadeStroke;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(x, y + 2 + h);
-      ctx.lineTo(x + fw, y + 2);
-      ctx.stroke();
     }
     if (clip.fadeOut > 0) {
       const fw = clip.fadeOut * this.zoom;
@@ -578,20 +563,11 @@ export class Timeline {
       ctx.lineTo(x + w, y + 2);
       ctx.lineTo(x + w - fw, y + 2 + h);
       ctx.fill();
-      ctx.strokeStyle = fadeStroke;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(x + w, y + 2 + h);
-      ctx.lineTo(x + w - fw, y + 2);
-      ctx.stroke();
     }
 
-    if (selected) {
-      this.drawFadeHandle(ctx, x + clip.fadeIn * this.zoom, y + 2, c);
-      this.drawFadeHandle(ctx, x + w - clip.fadeOut * this.zoom, y + 2, c);
-    }
-
-    if (this.mode === 'envelope' || selected) {
+    // Volume envelope: free dots along the clip (editable when selected or in envelope mode)
+    const editEnv = this.mode === 'envelope' || selected;
+    if (editEnv || selected) {
       const env = [...clip.envelope].sort((a, b) => a.time - b.time);
       ctx.strokeStyle = c.envelope;
       ctx.lineWidth = 2;
@@ -603,12 +579,17 @@ export class Timeline {
         else ctx.lineTo(px, py);
       });
       ctx.stroke();
-      if (this.mode === 'envelope') {
+      if (editEnv) {
         for (const pt of env) {
           const px = x + pt.time * this.zoom;
           const py = y + 2 + envelopeGainToY(pt.gain, h);
+          ctx.beginPath();
+          ctx.arc(px, py, 5, 0, Math.PI * 2);
           ctx.fillStyle = c.envelope;
-          ctx.fillRect(px - 4, py - 4, 8, 8);
+          ctx.fill();
+          ctx.strokeStyle = c.bg;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
         }
       }
     }
@@ -858,14 +839,19 @@ export class Timeline {
     const trackId = track?.id ?? null;
     const laneTop = this.trackY(ti);
 
-    if (this.mode === 'envelope' && trackId) {
+    // Envelope dots: editable on selected clip, or any clip in envelope mode
+    const editEnvelope =
+      this.mode === 'envelope' ||
+      (this.selectedClipId !== null && trackId !== null);
+    if (editEnvelope && trackId) {
       for (const clip of this.project.clips.filter((c) => c.trackId === trackId)) {
+        if (this.mode !== 'envelope' && clip.id !== this.selectedClipId) continue;
         const x = clip.start * this.zoom;
         const env = [...clip.envelope].sort((a, b) => a.time - b.time);
         for (let i = 0; i < env.length; i++) {
           const px = x + env[i].time * this.zoom;
           const py = laneTop + 2 + envelopeGainToY(env[i].gain, this.laneHeight - 4);
-          if (Math.abs(mx - px) < 8 && Math.abs(my - py) < 8) {
+          if (Math.abs(mx - px) < 9 && Math.abs(my - py) < 9) {
             return { type: 'env-point', clip, pointIdx: i };
           }
         }
@@ -873,7 +859,8 @@ export class Timeline {
           const local = time - clip.start;
           const g = interpolateEnvelope(clip.envelope, local, 1);
           const ey = laneTop + 2 + envelopeGainToY(g, this.laneHeight - 4);
-          if (Math.abs(my - ey) < 10) {
+          // Only near the volume curve — leave the rest of the clip free to drag
+          if (Math.abs(my - ey) < 12) {
             return { type: 'env-point', clip, pointIdx: -1 };
           }
         }
@@ -885,37 +872,10 @@ export class Timeline {
     const x = clip.start * this.zoom;
     const w = clipDuration(clip) * this.zoom;
     const localX = mx - x;
-    const inFadeBand = my <= laneTop + 28;
-
-    // Fade handles sit on the top edge so they don't steal trim/move hits.
-    if (inFadeBand) {
-      const fadeInX = x + clip.fadeIn * this.zoom;
-      const fadeOutX = x + w - clip.fadeOut * this.zoom;
-      if (Math.abs(mx - fadeInX) < 10) return { type: 'fade-in', clip };
-      if (Math.abs(mx - fadeOutX) < 10) return { type: 'fade-out', clip };
-    }
 
     if (Math.abs(localX) < 8) return { type: 'resize-l', clip };
     if (Math.abs(localX - w) < 8) return { type: 'resize-r', clip };
     return { type: 'move', clip };
-  }
-
-  private drawFadeHandle(
-    ctx: CanvasRenderingContext2D,
-    hx: number,
-    hy: number,
-    c: ThemeColors
-  ) {
-    ctx.fillStyle = c.envelope;
-    ctx.strokeStyle = c.bg;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(hx, hy);
-    ctx.lineTo(hx + 5, hy + 8);
-    ctx.lineTo(hx - 5, hy + 8);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
   }
 
   private beginHistory() {
@@ -974,6 +934,18 @@ export class Timeline {
       this.beginHistory();
       let env = [...hit.clip.envelope].sort((a, b) => a.time - b.time);
       let idx = hit.pointIdx ?? -1;
+
+      // Double-click an existing point to remove it (keep at least 2)
+      if (e.detail === 2 && idx >= 0 && env.length > 2) {
+        env.splice(idx, 1);
+        this.project.mutateClip(hit.clip.id, { envelope: env });
+        this.selectedClipId = hit.clip.id;
+        this.onSelectChange?.(hit.clip.id);
+        this.draw();
+        this.historyBegun = false;
+        return;
+      }
+
       if (idx < 0) {
         const local = Math.max(0, Math.min(clipDuration(hit.clip), time - hit.clip.start));
         const gain = interpolateEnvelope(env, local, 1);
@@ -994,11 +966,7 @@ export class Timeline {
 
     if (
       hit.clip &&
-      (hit.type === 'move' ||
-        hit.type === 'resize-l' ||
-        hit.type === 'resize-r' ||
-        hit.type === 'fade-in' ||
-        hit.type === 'fade-out')
+      (hit.type === 'move' || hit.type === 'resize-l' || hit.type === 'resize-r')
     ) {
       this.beginHistory();
       this.isDragging = true;
@@ -1080,27 +1048,6 @@ export class Timeline {
       return;
     }
 
-    if (this.dragType === 'fade-in') {
-      const dur = clipDuration(clip);
-      const maxIn = Math.max(0, dur - clip.fadeOut);
-      const fadeIn = Math.round(Math.max(0, Math.min(maxIn, time - clip.start)) * 1000) / 1000;
-      this.project.mutateClip(clip.id, { fadeIn });
-      this.onProjectChange?.();
-      this.draw();
-      return;
-    }
-
-    if (this.dragType === 'fade-out') {
-      const dur = clipDuration(clip);
-      const maxOut = Math.max(0, dur - clip.fadeIn);
-      const fadeOut =
-        Math.round(Math.max(0, Math.min(maxOut, clip.start + dur - time)) * 1000) / 1000;
-      this.project.mutateClip(clip.id, { fadeOut });
-      this.onProjectChange?.();
-      this.draw();
-      return;
-    }
-
     if (this.dragType === 'env-point') {
       const ti = this.project.tracks.findIndex((t) => t.id === clip.trackId);
       const laneTop = this.trackY(ti);
@@ -1129,8 +1076,6 @@ export class Timeline {
     const { mx, my, time } = this.pointer(e);
     const hit = this.hitTest(mx, my, time, e.altKey);
     const cursors: Record<DragType, string> = {
-      'fade-in': 'ew-resize',
-      'fade-out': 'ew-resize',
       'resize-l': 'ew-resize',
       'resize-r': 'ew-resize',
       move: 'grab',
