@@ -20,8 +20,17 @@ npm test
 npm run typecheck
 ```
 
-Deploy: push to `main` runs `.github/workflows/deploy.yml` (GitHub Pages). Ensure
-Pages is set to **GitHub Actions** under repo Settings → Pages.
+Deploy: push to `main` runs `.github/workflows/deploy.yml`, which builds with Vite and
+publishes **`dist/`** via GitHub Pages.
+
+**Required once** (or the site will serve the raw repo and break with `/src/main.ts` 404/MIME errors):
+
+1. Repo → **Settings** → **Pages**
+2. **Build and deployment** → **Source** → **GitHub Actions** (not “Deploy from a branch”)
+3. **Custom domain** → `audio.toeffe.uk` → Save (HTTPS may take a few minutes)
+4. Re-run the **Deploy** workflow (Actions → Deploy → Run workflow)
+
+DNS for `audio.toeffe.uk` should CNAME to `toeffe.github.io` (or the A records GitHub lists for apex domains).
 
 ## Features
 
