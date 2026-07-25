@@ -20,18 +20,6 @@ npm test
 npm run typecheck
 ```
 
-Deploy: push to `main` runs `.github/workflows/deploy.yml`, which builds with Vite and
-publishes **`dist/`** via GitHub Pages.
-
-**Required once** (or the site will serve the raw repo and break with `/src/main.ts` 404/MIME errors):
-
-1. Repo → **Settings** → **Pages**
-2. **Build and deployment** → **Source** → **GitHub Actions** (not “Deploy from a branch”)
-3. **Custom domain** → `audio.toeffe.uk` → Save (HTTPS may take a few minutes)
-4. Re-run the **Deploy** workflow (Actions → Deploy → Run workflow)
-
-DNS for `audio.toeffe.uk` should CNAME to `toeffe.github.io` (or the A records GitHub lists for apex domains).
-
 ## Features
 
 - **Multi-track** — drop audio onto a lane or **+ Track**; drag clips between lanes; remove tracks
@@ -45,13 +33,6 @@ DNS for `audio.toeffe.uk` should CNAME to `toeffe.github.io` (or the A records G
 - **Speed** — clip rate 0.25–4× (pitch follows)
 - **Envelope / spectrogram** on clips
 - **Export** — header **Export ▾**: format, bitrate, optional title/artist metadata
-
-## Limitations (intentional)
-
-- No project save/load with embedded audio
-- No MIDI / plugins / sends
-- Speed changes pitch (no pitch-preserving time-stretch yet)
-- No punch-in / take comping
 
 ## Project structure
 
