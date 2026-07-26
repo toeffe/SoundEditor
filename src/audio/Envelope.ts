@@ -8,8 +8,8 @@ export interface GainPoint {
 }
 
 /** Build absolute gain schedule (clip.gain × envelope × fades) for duration */
-export function buildGainSchedule(clip: Clip): GainPoint[] {
-  const duration = clipDuration(clip);
+export function buildGainSchedule(clip: Clip, trackRate = 1): GainPoint[] {
+  const duration = clipDuration(clip, trackRate);
   if (duration <= 0) return [{ time: 0, gain: 0 }];
 
   const pts: GainPoint[] = [];
@@ -37,6 +37,21 @@ export function buildGainSchedule(clip: Clip): GainPoint[] {
     pts.push({ time: t, gain: sample(t) });
   }
   return pts;
+}
+
+/** Interpolate a gain schedule at local clip time. */
+export function sampleGainSchedule(schedule: GainPoint[], local: number): number {
+  if (schedule.length === 0) return 0;
+  if (local <= schedule[0].time) return schedule[0].gain;
+  for (let i = 1; i < schedule.length; i++) {
+    const a = schedule[i - 1];
+    const b = schedule[i];
+    if (local <= b.time) {
+      const span = b.time - a.time || 1;
+      return a.gain + ((local - a.time) / span) * (b.gain - a.gain);
+    }
+  }
+  return schedule[schedule.length - 1].gain;
 }
 
 export function normalizeEnvelope(

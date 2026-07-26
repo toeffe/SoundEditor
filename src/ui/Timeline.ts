@@ -4,6 +4,13 @@ import type { Project } from '../project/Project';
 import { clipOverlap, interpolateEnvelope } from '../project/Project';
 import { envelopeGainToY, envelopeYToGain } from '../audio/Envelope';
 import type { AssetLibrary } from '../audio/AssetLibrary';
+import {
+  magneticThresholdFromZoom,
+  snapTime,
+  type SnapContext,
+} from '../audio/Snap';
+import { normalizeTrackEffects } from '../audio/TrackEffects';
+import type { MeterLevel } from '../audio/Engine';
 
 type DragType =
   | 'move'
@@ -15,12 +22,12 @@ type DragType =
 
 export const RULER_HEIGHT = 28;
 /** Minimum / default lane height. */
-export const LANE_HEIGHT = 88;
+export const LANE_HEIGHT = 108;
 /** Cap so a few tracks fill the window without a giant empty lane. */
 export const MAX_LANE_HEIGHT = 200;
 /** Fixed height of the "+ Track" strip (clickable, not viewport-filling). */
 export const ADD_STRIP_HEIGHT = 48;
-export const TRACK_HEADER_WIDTH = 148;
+export const TRACK_HEADER_WIDTH = 176;
 
 interface ThemeColors {
   bg: string;
@@ -66,10 +73,23 @@ export class Timeline {
 
   zoom = 100;
   playhead = 0;
+  /** When true, scroll the viewport to keep the playhead in view. */
+  followPlayhead = false;
   selectedClipId: string | null = null;
   mode: 'normal' | 'envelope' = 'normal';
   showSpectrogram = false;
   selection: TimeSelection | null = null;
+  loopEnabled = false;
+
+  snapEnabled = false;
+  magneticEnabled = true;
+  gridStep = 0.1;
+  /** Track currently capturing mic input, if any. */
+  recordingTrackId: string | null = null;
+
+  /** Live meter levels from Engine (peak 0..1). */
+  private meterLevels = new Map<string, { peak: number; rms: number }>();
+  private meterEls = new Map<string, HTMLElement>();
 
   /** Per-track lane height; grows with available viewport (capped). */
   private laneHeight = LANE_HEIGHT;
@@ -95,6 +115,13 @@ export class Timeline {
   onTrackChange: (() => void) | null = null;
   onAddTrack: (() => void) | null = null;
   onRemoveTrack: ((trackId: string) => void) | null = null;
+  onEditTrackFx: ((trackId: string, anchor: HTMLElement) => void) | null = null;
+  /** Start/stop mic recording on this track. */
+  onRecordTrack: ((trackId: string) => void) | null = null;
+  /** Clip timing/envelope changed in a way that should refresh live playback. */
+  onClipLiveChange: ((kind?: 'envelope' | 'timing') => void) | null = null;
+  /** Fired when the shift-drag time selection changes or clears. */
+  onSelectionChange: (() => void) | null = null;
   /** Drop audio files onto a track (or create a new track when createTrack is true). */
   onImportFiles:
     | ((
@@ -181,6 +208,20 @@ export class Timeline {
     return this.spacer.parentElement!;
   }
 
+  private clipDur(clip: Clip): number {
+    if (!this.project) return clipDuration(clip);
+    return this.project.clipDur(clip);
+  }
+
+  private clipRateOf(clip: Clip): number {
+    if (!this.project) return clip.rate > 0 ? clip.rate : 1;
+    return this.project.effectiveRate(clip);
+  }
+
+  private trackRateOf(trackId: string): number {
+    return this.project?.trackRate(trackId) ?? 1;
+  }
+
   setProject(project: Project, library: AssetLibrary) {
     this.project = project;
     this.library = library;
@@ -234,7 +275,24 @@ export class Timeline {
   setPlayhead(t: number) {
     const max = Math.max(this.project?.duration ?? 0, t);
     this.playhead = Math.max(0, Math.min(max, t));
+    if (this.followPlayhead && !this.isSeekDragging) {
+      this.keepPlayheadInView();
+    }
     this.draw();
+  }
+
+  /** Scroll so the playhead stays in the left portion of the viewport (lookahead). */
+  private keepPlayheadInView() {
+    const wrap = this.scroller();
+    const viewW = wrap.clientWidth;
+    if (viewW <= 0) return;
+    const px = this.playhead * this.zoom;
+    const left = wrap.scrollLeft;
+    const right = left + viewW;
+    const pad = Math.min(96, viewW * 0.18);
+    if (px >= left + pad && px <= right - pad) return;
+    wrap.scrollLeft = Math.max(0, px - viewW * 0.28);
+    this.scrollLeft = wrap.scrollLeft;
   }
 
   setMode(mode: 'normal' | 'envelope') {
@@ -246,6 +304,81 @@ export class Timeline {
     this.showSpectrogram = !this.showSpectrogram;
     this.draw();
     return this.showSpectrogram;
+  }
+
+  setSnapEnabled(on: boolean) {
+    this.snapEnabled = on;
+    this.draw();
+  }
+
+  setMagneticEnabled(on: boolean) {
+    this.magneticEnabled = on;
+  }
+
+  setGridStep(step: number) {
+    this.gridStep = step;
+    this.draw();
+  }
+
+  setLoopEnabled(on: boolean) {
+    this.loopEnabled = on;
+    this.draw();
+  }
+
+  setRecordingTrack(trackId: string | null) {
+    this.recordingTrackId = trackId;
+    this.renderHeaders();
+  }
+
+  setMeterLevels(levels: MeterLevel[]) {
+    for (const l of levels) {
+      const prev = this.meterLevels.get(l.id) ?? { peak: 0, rms: 0 };
+      // Fast attack, slow release
+      const peak = l.peak >= prev.peak ? l.peak : prev.peak * 0.85 + l.peak * 0.15;
+      const rms = l.rms >= prev.rms ? l.rms : prev.rms * 0.9 + l.rms * 0.1;
+      this.meterLevels.set(l.id, { peak, rms });
+      const el = this.meterEls.get(l.id);
+      if (el) {
+        const fill = el.querySelector('.meter-fill') as HTMLElement | null;
+        if (fill) fill.style.width = `${Math.min(100, peak * 100)}%`;
+      }
+    }
+  }
+
+  clearMeters() {
+    this.meterLevels.clear();
+    for (const el of this.meterEls.values()) {
+      const fill = el.querySelector('.meter-fill') as HTMLElement | null;
+      if (fill) fill.style.width = '0%';
+    }
+  }
+
+  /** Snap-aware time for external nudges. */
+  snap(t: number, excludeClipId?: string | null, trackId?: string | null): number {
+    return snapTime(t, this.snapContext(excludeClipId, trackId));
+  }
+
+  nudgeStep(fine = false): number {
+    if (fine) return 0.01;
+    return this.snapEnabled ? this.gridStep : 0.1;
+  }
+
+  private snapContext(excludeClipId?: string | null, trackId?: string | null): SnapContext {
+    const candidates: number[] = [];
+    if (this.project && this.magneticEnabled) {
+      for (const c of this.project.clips) {
+        if (excludeClipId && c.id === excludeClipId) continue;
+        if (trackId && c.trackId !== trackId) continue;
+        candidates.push(c.start, c.start + this.clipDur(c));
+      }
+    }
+    return {
+      gridEnabled: this.snapEnabled,
+      gridStep: this.gridStep,
+      magneticEnabled: this.magneticEnabled,
+      magneticThresholdSec: magneticThresholdFromZoom(this.zoom),
+      magneticCandidates: candidates,
+    };
   }
 
   /**
@@ -397,11 +530,13 @@ export class Timeline {
 
     ctx.fillStyle = c.gridText;
     ctx.font = '11px sans-serif';
-    const step = Math.max(0.25, niceStep(60 / this.zoom));
+    const step = this.snapEnabled
+      ? this.gridStep
+      : Math.max(0.25, niceStep(60 / this.zoom));
     const first = Math.floor(t0 / step) * step;
     for (let t = first; t <= t1 + step; t += step) {
       const x = t * this.zoom - scroll;
-      ctx.strokeStyle = c.grid;
+      ctx.strokeStyle = this.snapEnabled ? withAlpha(c.envelope, 0.22) : c.grid;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
@@ -420,7 +555,7 @@ export class Timeline {
       ctx.setLineDash([]);
       ctx.fillStyle = c.gridText;
       ctx.font = '12px sans-serif';
-      ctx.fillText('Drop audio here to create the first track', 16, y + this.laneHeight / 2 + 4);
+      ctx.fillText('Drop audio or project.toff file here to create the first track', 16, y + this.laneHeight / 2 + 4);
     } else {
       tracks.forEach((_track, i) => {
         const y = this.trackY(i);
@@ -443,7 +578,7 @@ export class Timeline {
       for (let j = i + 1; j < this.project.clips.length; j++) {
         const a = this.project.clips[i];
         const b = this.project.clips[j];
-        const o = clipOverlap(a, b);
+        const o = clipOverlap(a, b, this.trackRateOf(a.trackId));
         if (!o) continue;
         const ti = tracks.findIndex((t) => t.id === a.trackId);
         if (ti < 0) continue;
@@ -484,8 +619,21 @@ export class Timeline {
     if (this.selection) {
       const x1 = this.selection.start * this.zoom - scroll;
       const x2 = this.selection.end * this.zoom - scroll;
-      ctx.fillStyle = withAlpha(c.clipBorderSelected, 0.18);
-      ctx.fillRect(x1, RULER_HEIGHT, x2 - x1, h - RULER_HEIGHT);
+      const left = Math.min(x1, x2);
+      const width = Math.abs(x2 - x1);
+      if (this.loopEnabled) {
+        ctx.fillStyle = withAlpha(c.envelope, 0.2);
+        ctx.fillRect(left, RULER_HEIGHT, width, h - RULER_HEIGHT);
+        ctx.strokeStyle = c.envelope;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(left + 0.5, RULER_HEIGHT + 0.5, width - 1, h - RULER_HEIGHT - 1);
+        ctx.fillStyle = c.envelope;
+        ctx.font = '10px sans-serif';
+        ctx.fillText('LOOP', left + 6, RULER_HEIGHT + 14);
+      } else {
+        ctx.fillStyle = withAlpha(c.clipBorderSelected, 0.18);
+        ctx.fillRect(left, RULER_HEIGHT, width, h - RULER_HEIGHT);
+      }
     }
 
     const px = this.playhead * this.zoom - scroll;
@@ -508,7 +656,7 @@ export class Timeline {
     const ctx = this.ctx;
     const c = this.colors;
     const x = clip.start * this.zoom - scroll;
-    const w = clipDuration(clip) * this.zoom;
+    const w = this.clipDur(clip) * this.zoom;
     const srcX = clip.sourceStart * this.zoom;
     const selected = clip.id === this.selectedClipId;
     const viewW = this.viewWidth();
@@ -550,7 +698,7 @@ export class Timeline {
       ctx.fillStyle = selected ? c.waveformSelected : c.waveform;
       const cy = y + 2 + h / 2;
       const amp = h / 2 - 6;
-      const rate = clip.rate > 0 ? clip.rate : 1;
+      const rate = this.clipRateOf(clip);
       const startIdx = Math.floor(srcX);
       for (let i = 0; i < Math.floor(w); i++) {
         // Map timeline pixel → source peak index
@@ -622,25 +770,29 @@ export class Timeline {
       ctx.fillRect(x + w - 3, y + h / 2 - 10, 6, 20);
     }
 
-    if (Math.abs(clip.rate - 1) > 1e-3) {
+    const rateLabel = this.clipRateOf(clip);
+    if (Math.abs(rateLabel - 1) > 1e-3) {
       ctx.fillStyle = c.gridText;
       ctx.font = '10px sans-serif';
-      ctx.fillText(`${clip.rate.toFixed(2)}×`, x + 6, y + 14);
+      ctx.fillText(`${rateLabel.toFixed(2)}×`, x + 6, y + 14);
     }
   }
 
   renderHeaders() {
     if (!this.project) {
       this.headersEl.innerHTML = '';
+      this.meterEls.clear();
       return;
     }
     const tracks = this.project.tracks;
     this.headersEl.style.paddingTop = RULER_HEIGHT + 'px';
     this.headersEl.innerHTML = '';
+    this.meterEls.clear();
 
     for (const track of tracks) {
       const row = document.createElement('div');
-      row.className = 'track-header' + (this.project.armedTrackId === track.id ? ' armed' : '');
+      const isRecording = this.recordingTrackId === track.id;
+      row.className = 'track-header' + (isRecording ? ' recording' : '');
       row.style.height = this.laneHeight + 'px';
       row.dataset.trackId = track.id;
 
@@ -663,10 +815,25 @@ export class Timeline {
         });
       });
 
+      const top = document.createElement('div');
+      top.className = 'track-header__top';
+
       const name = document.createElement('div');
       name.className = 'track-header__name';
       name.textContent = track.name;
       name.title = track.name;
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'Delete';
+      remove.className = 'track-delete';
+      remove.title = 'Delete this track and its clips';
+      remove.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.onRemoveTrack?.(track.id);
+      });
+
+      top.append(remove, name);
 
       const btns = document.createElement('div');
       btns.className = 'track-header__btns';
@@ -693,30 +860,40 @@ export class Timeline {
         this.onTrackChange?.();
       });
 
-      const arm = document.createElement('button');
-      arm.type = 'button';
-      arm.textContent = '●';
-      arm.className = 'track-chip' + (this.project.armedTrackId === track.id ? ' on arm' : '');
-      arm.title = 'Arm for record';
-      arm.addEventListener('click', (e) => {
+      const rec = document.createElement('button');
+      rec.type = 'button';
+      rec.textContent = isRecording ? '⏹ Stop' : '⏺ Rec';
+      rec.className = 'track-chip track-rec' + (isRecording ? ' on recording' : '');
+      rec.title = isRecording ? 'Stop recording' : 'Record onto this track from playhead';
+      if (this.recordingTrackId && !isRecording) rec.disabled = true;
+      rec.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (!this.project) return;
-        const next = this.project.armedTrackId === track.id ? null : track.id;
-        this.project.setArmedTrack(next);
-        this.onTrackChange?.();
+        this.onRecordTrack?.(track.id);
       });
 
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.textContent = '×';
-      remove.className = 'track-chip track-chip--danger';
-      remove.title = 'Remove track';
-      remove.addEventListener('click', (e) => {
+      const fxBtn = document.createElement('button');
+      fxBtn.type = 'button';
+      fxBtn.textContent = 'FX';
+      fxBtn.className = 'track-chip track-fx';
+      fxBtn.title = 'Track effects';
+      const fx = normalizeTrackEffects(track.effects);
+      if (fx.compressor.enabled || fx.nightcore.enabled || fx.eq.lowGain || fx.eq.midGain || fx.eq.highGain) {
+        fxBtn.classList.add('on');
+      }
+      fxBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        this.onRemoveTrack?.(track.id);
+        this.onEditTrackFx?.(track.id, fxBtn);
       });
 
-      btns.append(mute, solo, arm, remove);
+      btns.append(mute, solo, rec, fxBtn);
+
+      const meter = document.createElement('div');
+      meter.className = 'track-meter';
+      meter.title = 'Level';
+      const fill = document.createElement('div');
+      fill.className = 'meter-fill';
+      meter.appendChild(fill);
+      this.meterEls.set(track.id, meter);
 
       const fader = document.createElement('input');
       fader.type = 'range';
@@ -735,7 +912,31 @@ export class Timeline {
         this.onProjectChange?.();
       });
 
-      row.append(name, btns, fader);
+      const speedRow = document.createElement('label');
+      speedRow.className = 'track-speed';
+      speedRow.title = 'Track speed — pitch follows';
+      speedRow.append(document.createTextNode('Speed'));
+      const speed = document.createElement('input');
+      speed.type = 'number';
+      speed.min = '0.25';
+      speed.max = '4';
+      speed.step = '0.05';
+      speed.value = String(track.rate > 0 ? track.rate : 1);
+      speed.addEventListener('pointerdown', () => this.project?.beginEdit());
+      speed.addEventListener('input', () => {
+        const r = Math.max(0.25, Math.min(4, parseFloat(speed.value) || 1));
+        speed.value = String(r);
+        this.project?.mutateTrack(track.id, { rate: r });
+        this.draw();
+        this.onClipLiveChange?.('timing');
+        this.onTrackChange?.();
+      });
+      speed.addEventListener('change', () => {
+        this.onProjectChange?.();
+      });
+      speedRow.appendChild(speed);
+
+      row.append(top, btns, meter, fader, speedRow);
       this.headersEl.appendChild(row);
     }
 
@@ -829,7 +1030,7 @@ export class Timeline {
     if (!this.project) return null;
     const candidates = this.project.clips.filter((c) => {
       if (trackId && c.trackId !== trackId) return false;
-      return time >= c.start && time <= c.start + clipDuration(c);
+      return time >= c.start && time <= c.start + this.clipDur(c);
     });
     return candidates[candidates.length - 1] ?? null;
   }
@@ -877,7 +1078,7 @@ export class Timeline {
             return { type: 'env-point', clip, pointIdx: i };
           }
         }
-        if (time >= clip.start && time <= clip.start + clipDuration(clip)) {
+        if (time >= clip.start && time <= clip.start + this.clipDur(clip)) {
           const local = time - clip.start;
           const g = interpolateEnvelope(clip.envelope, local, 1);
           const ey = laneTop + 2 + envelopeGainToY(g, this.laneHeight - 4);
@@ -892,7 +1093,7 @@ export class Timeline {
     const clip = this.hitClipAt(time, trackId);
     if (!clip) return { type: 'seek' };
     const x = clip.start * this.zoom;
-    const w = clipDuration(clip) * this.zoom;
+    const w = this.clipDur(clip) * this.zoom;
     const localX = mx - x;
 
     if (Math.abs(localX) < 8) return { type: 'resize-l', clip };
@@ -964,17 +1165,19 @@ export class Timeline {
         this.selectedClipId = hit.clip.id;
         this.onSelectChange?.(hit.clip.id);
         this.draw();
+        this.onClipLiveChange?.('envelope');
         this.historyBegun = false;
         return;
       }
 
       if (idx < 0) {
-        const local = Math.max(0, Math.min(clipDuration(hit.clip), time - hit.clip.start));
+        const local = Math.max(0, Math.min(this.clipDur(hit.clip), time - hit.clip.start));
         const gain = interpolateEnvelope(env, local, 1);
         env.push({ time: local, gain });
         env.sort((a, b) => a.time - b.time);
         idx = env.findIndex((p) => Math.abs(p.time - local) < 1e-6);
         this.project.mutateClip(hit.clip.id, { envelope: env });
+        this.onClipLiveChange?.('envelope');
       }
       this.isDragging = true;
       this.dragType = 'env-point';
@@ -1022,7 +1225,8 @@ export class Timeline {
     }
 
     if (this.dragType === 'seek') {
-      this.setPlayhead(Math.max(0, time));
+      const t = this.snap(Math.max(0, time));
+      this.setPlayhead(t);
       this.onSeek?.(this.playhead);
       return;
     }
@@ -1034,16 +1238,21 @@ export class Timeline {
       const dx = time - this.dragStartTime;
       const ti = this.trackIndexAtY(my);
       const track = ti >= 0 ? this.project.tracks[ti] : undefined;
-      const patch: Partial<Clip> = { start: Math.max(0, this.dragClipStart + dx) };
+      const trackId = track?.id ?? clip.trackId;
+      const rawStart = Math.max(0, this.dragClipStart + dx);
+      const start = this.snap(rawStart, clip.id, trackId);
+      const patch: Partial<Clip> = { start };
       if (track && track.id !== clip.trackId) patch.trackId = track.id;
       this.project.mutateClip(clip.id, patch);
       this.draw();
+      this.onClipLiveChange?.('timing');
       return;
     }
 
     if (this.dragType === 'resize-l') {
-      const rate = clip.rate > 0 ? clip.rate : 1;
-      const local = time - this.dragClipStart;
+      const rate = this.clipRateOf(clip);
+      const snapped = this.snap(time, clip.id, clip.trackId);
+      const local = snapped - this.dragClipStart;
       const newSourceStart = Math.max(
         0,
         Math.min(this.dragSourceEnd - 0.05, this.dragSourceStart + local * rate)
@@ -1054,19 +1263,22 @@ export class Timeline {
         sourceStart: newSourceStart,
       });
       this.draw();
+      this.onClipLiveChange?.('timing');
       return;
     }
 
     if (this.dragType === 'resize-r') {
-      const rate = clip.rate > 0 ? clip.rate : 1;
+      const rate = this.clipRateOf(clip);
       const asset = this.library?.get(clip.assetId);
       const maxEnd = asset?.buffer.duration ?? this.dragSourceEnd;
+      const snapped = this.snap(time, clip.id, clip.trackId);
       const newEnd = Math.max(
         this.dragSourceStart + 0.05,
-        Math.min(maxEnd, this.dragSourceEnd + (time - this.dragStartTime) * rate)
+        Math.min(maxEnd, this.dragSourceEnd + (snapped - this.dragStartTime) * rate)
       );
       this.project.mutateClip(clip.id, { sourceEnd: newEnd });
       this.draw();
+      this.onClipLiveChange?.('timing');
       return;
     }
 
@@ -1076,7 +1288,7 @@ export class Timeline {
       const env = [...clip.envelope].sort((a, b) => a.time - b.time);
       const idx = this.dragPointIdx;
       if (idx >= 0 && idx < env.length) {
-        const local = Math.max(0, Math.min(clipDuration(clip), time - clip.start));
+        const local = Math.max(0, Math.min(this.clipDur(clip), time - clip.start));
         env[idx] = {
           time: local,
           gain: envelopeYToGain(my - laneTop - 2, this.laneHeight - 4),
@@ -1086,6 +1298,7 @@ export class Timeline {
         if (this.dragPointIdx < 0) this.dragPointIdx = idx;
         this.project.mutateClip(clip.id, { envelope: env });
         this.draw();
+        this.onClipLiveChange?.('envelope');
       }
     }
   };
@@ -1109,7 +1322,8 @@ export class Timeline {
   }
 
   private onUp = () => {
-    if (this.dragType === 'select' && this.selection) {
+    const wasSelect = this.dragType === 'select';
+    if (wasSelect && this.selection) {
       if (Math.abs(this.selection.end - this.selection.start) < 0.05) {
         this.selection = null;
       }
@@ -1125,6 +1339,7 @@ export class Timeline {
     this.dragClipId = null;
     this.dragPointIdx = -1;
     this.historyBegun = false;
+    if (wasSelect) this.onSelectionChange?.();
   };
 }
 

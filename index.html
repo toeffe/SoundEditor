@@ -27,11 +27,11 @@
         <button id="redo-btn" title="Ctrl+Y" aria-label="Redo" disabled>↷ Redo</button>
         <button id="play-btn" aria-label="Play">▶ Play</button>
         <button id="stop-btn" aria-label="Stop">⏹ Stop</button>
-        <button id="record-btn" aria-label="Record" title="R" disabled>⏺ Record</button>
         <label class="master-control" for="master-gain" title="Master volume">
           Master
           <input type="range" id="master-gain" min="0" max="100" value="100" />
           <span id="master-gain-value" class="gain-readout" aria-live="polite">100</span>
+          <span class="master-meter" id="master-meter" title="Master level"><span class="meter-fill"></span></span>
         </label>
         <span id="time-display" role="timer" aria-label="Playback position">0:00.00</span>
         <button type="button" id="edit-menu-btn" aria-haspopup="menu" aria-expanded="false" title="Edit actions (also on right-click)">
@@ -50,13 +50,12 @@
         <div class="export-wrap">
           <button
             type="button"
-            id="export-menu-btn"
-            aria-haspopup="dialog"
+            id="files-menu-btn"
+            aria-haspopup="menu"
             aria-expanded="false"
-            aria-controls="export-panel"
-            title="Export mix"
+            title="Save, load, and export"
           >
-            Export ▾
+            Files ▾
           </button>
           <div id="export-panel" class="export-popover" hidden role="dialog" aria-label="Export options">
             <div class="export-popover__row">
@@ -101,20 +100,35 @@
       </div>
     </header>
 
-    <p id="status" class="status" role="status" aria-live="polite"></p>
-
     <div class="toolbar">
-      <label for="clip-rate">Speed <input type="number" id="clip-rate" min="0.25" max="4" step="0.05" value="1" disabled title="Pitch follows" /></label>
       <span id="clip-info" class="hint" aria-live="polite">No clip selected</span>
     </div>
 
     <div id="timeline-row" class="timeline-row"></div>
 
-    <p class="hint app-hint">
-      Scroll to zoom · Select a clip · Click the volume line to add dots · Drag dots for gain ·
-      Track faders on the left · Double-click a dot to remove · Space play
-    </p>
+    <footer class="app-footer">
+      <p class="hint app-hint">
+        Scroll zoom · Shift-drag loop region · L loop · Edit ▾ snap · Arrows nudge · FX · Files ▾ .toff / export · autosave
+      </p>
+      <div class="activity">
+        <button
+          type="button"
+          id="activity-toggle"
+          class="activity-toggle"
+          aria-expanded="false"
+          aria-controls="activity-log"
+          title="Session activity log"
+        >
+          Log
+        </button>
+        <p id="status" class="activity-latest" role="status" aria-live="polite"></p>
+        <div id="activity-log" class="activity-log" hidden>
+          <ol id="activity-list" class="activity-list" reversed></ol>
+        </div>
+      </div>
+    </footer>
   </div>
+  <div id="fx-popover" class="fx-popover" hidden role="dialog" aria-label="Track effects"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

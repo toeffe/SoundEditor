@@ -1,8 +1,10 @@
 import type { Clip } from '../types';
-import { clipDuration, sourceDuration } from '../types';
+import { clipDuration, clipPlaybackRate, sourceDuration } from '../types';
 import { buildGainSchedule } from './Envelope';
 import { clipOverlap, type Project } from '../project/Project';
 import type { AssetLibrary } from './AssetLibrary';
+import { buildTrackFxChain, nightcoreAmount } from './FxChain';
+import { normalizeTrackEffects } from './TrackEffects';
 
 export async function renderProject(
   project: Project,
@@ -17,7 +19,7 @@ export async function renderProject(
     return empty.startRendering();
   }
 
-  const duration = Math.max(...clips.map((c) => c.start + clipDuration(c)));
+  const duration = Math.max(...clips.map((c) => c.start + project.clipDur(c)));
   const frames = Math.max(1, Math.ceil(duration * sampleRate));
   const offline = new OfflineAudioContext(channels, frames, sampleRate);
 
@@ -25,28 +27,36 @@ export async function renderProject(
   master.gain.value = project.state.masterGain;
   master.connect(offline.destination);
 
-  const trackGains = new Map<string, GainNode>();
+  const trackInputs = new Map<string, GainNode>();
   for (const track of project.tracks) {
+    const fx = normalizeTrackEffects(track.effects);
+    const { input, output } = buildTrackFxChain(offline, fx);
     const g = offline.createGain();
     const audible = project.trackAudible(track.id);
     g.gain.value = audible ? track.gain : 0;
+    output.connect(g);
     g.connect(master);
-    trackGains.set(track.id, g);
+    trackInputs.set(track.id, input);
   }
 
   for (const clip of clips) {
     const buffer = library.getBuffer(clip.assetId);
-    const trackGain = trackGains.get(clip.trackId);
-    if (!buffer || !trackGain) continue;
-    const dur = clipDuration(clip);
+    const trackInput = trackInputs.get(clip.trackId);
+    if (!buffer || !trackInput) continue;
+    const trackRate = project.trackRate(clip.trackId);
+    const dur = clipDuration(clip, trackRate);
     if (dur <= 0) continue;
 
-    const rate = clip.rate > 0 ? clip.rate : 1;
+    const track = project.state.tracks.find((t) => t.id === clip.trackId);
+    const nc = nightcoreAmount(normalizeTrackEffects(track?.effects));
+    const baseRate = clipPlaybackRate(clip, trackRate);
+    const rate = baseRate * nc;
+
     const src = offline.createBufferSource();
     src.buffer = buffer;
     src.playbackRate.value = rate;
     const gain = offline.createGain();
-    const schedule = buildGainSchedule(clip);
+    const schedule = buildGainSchedule(clip, trackRate);
     const xf = crossfadeMultiplier(project, clip);
 
     schedule.forEach((pt, i) => {
@@ -58,7 +68,7 @@ export async function renderProject(
 
     for (const other of clips) {
       if (other.id === clip.id) continue;
-      const o = clipOverlap(clip, other);
+      const o = clipOverlap(clip, other, trackRate);
       if (!o) continue;
       for (const edge of [o.start, o.end]) {
         const local = edge - clip.start;
@@ -78,7 +88,7 @@ export async function renderProject(
       }
     }
 
-    src.connect(gain).connect(trackGain);
+    src.connect(gain).connect(trackInput);
     src.start(clip.start, clip.sourceStart, sourceDuration(clip));
   }
 
@@ -89,11 +99,12 @@ function crossfadeMultiplier(project: Project, clip: Clip): (localTime: number) 
   const others = project.clips.filter(
     (c) => c.id !== clip.id && c.trackId === clip.trackId
   );
+  const trackRate = project.trackRate(clip.trackId);
   return (localTime: number) => {
     const abs = clip.start + localTime;
     let m = 1;
     for (const other of others) {
-      const o = clipOverlap(clip, other);
+      const o = clipOverlap(clip, other, trackRate);
       if (!o) continue;
       if (abs < o.start || abs > o.end) continue;
       const u = (abs - o.start) / (o.end - o.start || 1);

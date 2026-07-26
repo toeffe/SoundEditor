@@ -40,6 +40,23 @@ export class AssetLibrary {
     return asset;
   }
 
+  /** Restore a previously persisted asset id. */
+  restore(id: string, name: string, buffer: AudioBuffer): Asset {
+    const asset: Asset = {
+      id,
+      name,
+      buffer,
+      peaks: null,
+      spectrogram: null,
+    };
+    this.assets.set(asset.id, asset);
+    return asset;
+  }
+
+  all(): Asset[] {
+    return [...this.assets.values()];
+  }
+
   setPeaks(id: string, peaks: Float32Array) {
     const a = this.assets.get(id);
     if (a) a.peaks = peaks;

@@ -1,5 +1,6 @@
 import type { Clip, EnvelopePoint, ProjectState, Track } from '../types';
-import { clipDuration } from '../types';
+import { clipDuration, clipPlaybackRate } from '../types';
+import { normalizeTrackEffects } from '../audio/TrackEffects';
 import { uid } from '../uid';
 
 export { uid };
@@ -41,7 +42,20 @@ export class Project {
 
   get duration(): number {
     if (this.state.clips.length === 0) return 0;
-    return Math.max(...this.state.clips.map((c) => c.start + clipDuration(c)));
+    return Math.max(...this.state.clips.map((c) => c.start + this.clipDur(c)));
+  }
+
+  trackRate(trackId: string): number {
+    const t = this.state.tracks.find((x) => x.id === trackId);
+    return t && t.rate > 0 ? t.rate : 1;
+  }
+
+  clipDur(clip: Clip): number {
+    return clipDuration(clip, this.trackRate(clip.trackId));
+  }
+
+  effectiveRate(clip: Clip): number {
+    return clipPlaybackRate(clip, this.trackRate(clip.trackId));
   }
 
   get sampleRate(): number {
@@ -97,8 +111,10 @@ export class Project {
         name: t.name,
         order: t.order ?? 0,
         gain: t.gain ?? 1,
+        rate: t.rate > 0 ? t.rate : 1,
         mute: !!t.mute,
         solo: !!t.solo,
+        effects: normalizeTrackEffects(t.effects),
       })),
       clips: (raw.clips ?? []).map((c) => this.normalizeClip(c)),
       masterGain: raw.masterGain ?? 1,
@@ -117,8 +133,10 @@ export class Project {
       name,
       order,
       gain: 1,
+      rate: 1,
       mute: false,
       solo: false,
+      effects: normalizeTrackEffects(),
     };
   }
 
@@ -159,7 +177,11 @@ export class Project {
     sampleRate = 44100
   ) {
     this.state = {
-      tracks: [...tracks],
+      tracks: tracks.map((t) => ({
+        ...t,
+        rate: t.rate > 0 ? t.rate : 1,
+        effects: normalizeTrackEffects(t.effects),
+      })),
       clips: [...clips].map((c) => this.normalizeClip(c)),
       masterGain,
       metadata,
@@ -237,8 +259,10 @@ export class Project {
       name,
       order,
       gain: sourceTrack.gain,
+      rate: sourceTrack.rate > 0 ? sourceTrack.rate : 1,
       mute: sourceTrack.mute,
       solo: false,
+      effects: normalizeTrackEffects(sourceTrack.effects),
     };
 
     const toPaste = sourceClips.map((c) =>
@@ -306,13 +330,13 @@ export class Project {
   splitClip(id: string, time: number): string | null {
     const clip = this.state.clips.find((c) => c.id === id);
     if (!clip) return null;
-    const dur = clipDuration(clip);
+    const dur = this.clipDur(clip);
     const local = time - clip.start;
     if (local <= 0.05 || local >= dur - 0.05) return null;
 
     this.pushHistory();
     const gainAt = interpolateEnvelope(clip.envelope, local, 1);
-    const rate = clip.rate > 0 ? clip.rate : 1;
+    const rate = this.effectiveRate(clip);
     const localSource = local * rate;
 
     const leftEnv = clip.envelope
@@ -362,7 +386,7 @@ export class Project {
     const next = sameTrack[idx + 1];
     if (next.assetId !== clip.assetId) return false;
     if (Math.abs(next.rate - clip.rate) > 1e-6) return false;
-    const end = clip.start + clipDuration(clip);
+    const end = clip.start + this.clipDur(clip);
     if (Math.abs(next.start - end) > 0.02) return false;
     if (Math.abs(next.sourceStart - clip.sourceEnd) > 0.02) return false;
     return true;
@@ -392,10 +416,10 @@ export class Project {
     const next = sameTrack[idx + 1];
 
     this.pushHistory();
-    const newDur = clipDuration(clip) + clipDuration(next);
+    const newDur = this.clipDur(clip) + this.clipDur(next);
     const mergedEnv = [
       ...clip.envelope.map((p) => ({ ...p })),
-      ...next.envelope.map((p) => ({ ...p, time: p.time + clipDuration(clip) })),
+      ...next.envelope.map((p) => ({ ...p, time: p.time + this.clipDur(clip) })),
     ];
     const merged: Clip = {
       ...clip,
@@ -425,7 +449,7 @@ export class Project {
     const idx = sameTrack.findIndex((c) => c.id === id);
     if (idx < 0 || idx >= sameTrack.length - 1) return false;
     const next = sameTrack[idx + 1];
-    const end = clip.start + clipDuration(clip);
+    const end = clip.start + this.clipDur(clip);
     const gap = next.start - end;
     // Already overlapping enough
     if (gap < -overlap + 1e-6) return true;
@@ -445,7 +469,7 @@ export class Project {
     // leaving durations; overlap = end - next.start after nudge
     const left = this.state.clips.find((c) => c.id === clip.id)!;
     const right = this.state.clips.find((c) => c.id === next.id)!;
-    const leftEnd = left.start + clipDuration(left);
+    const leftEnd = left.start + this.clipDur(left);
     if (right.start >= leftEnd) {
       right.start = Math.max(0, leftEnd - overlap);
     }
@@ -467,7 +491,7 @@ export class Project {
         sampleRate: this.sampleRate,
       }).clips[0],
       id: uid(),
-      start: clip.start + clipDuration(clip),
+      start: clip.start + this.clipDur(clip),
     };
     this.state.clips.push(dup);
     this.sort();
@@ -545,13 +569,14 @@ export function interpolateEnvelope(
 /** Overlap [start,end) between two clips on the same track, or null. */
 export function clipOverlap(
   a: Clip,
-  b: Clip
+  b: Clip,
+  trackRate = 1
 ): { start: number; end: number } | null {
   if (a.trackId !== b.trackId) return null;
   const a0 = a.start;
-  const a1 = a.start + clipDuration(a);
+  const a1 = a.start + clipDuration(a, trackRate);
   const b0 = b.start;
-  const b1 = b.start + clipDuration(b);
+  const b1 = b.start + clipDuration(b, trackRate);
   const start = Math.max(a0, b0);
   const end = Math.min(a1, b1);
   if (end - start <= 1e-4) return null;
@@ -565,15 +590,16 @@ export function clipOverlap(
 export function sliceClipToRange(
   clip: Clip,
   rangeStart: number,
-  rangeEnd: number
+  rangeEnd: number,
+  trackRate = 1
 ): Clip | null {
   const clipStart = clip.start;
-  const clipEnd = clip.start + clipDuration(clip);
+  const clipEnd = clip.start + clipDuration(clip, trackRate);
   const start = Math.max(clipStart, rangeStart);
   const end = Math.min(clipEnd, rangeEnd);
   if (end - start < 0.05) return null;
 
-  const rate = clip.rate > 0 ? clip.rate : 1;
+  const rate = clipPlaybackRate(clip, trackRate);
   const localStart = start - clipStart;
   const localEnd = end - clipStart;
   const newDur = localEnd - localStart;

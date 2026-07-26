@@ -9,7 +9,22 @@ import { Recorder } from './audio/Recorder';
 import { Timeline } from './ui/Timeline';
 import { ContextMenu } from './ui/ContextMenu';
 import { exportAudio, getFFmpeg } from './export/FFmpegExporter';
-import { clipDuration, type Clip, type Track } from './types';
+import { type Clip, type Track } from './types';
+import { defaultTrackEffects, normalizeTrackEffects, type TrackEffects } from './audio/TrackEffects';
+import {
+  clearSavedProject,
+  hasSavedProject,
+  loadProject,
+  saveProject,
+  type StoredUiFlags,
+} from './storage/ProjectStore';
+import {
+  buildToffBlob,
+  isToffFile,
+  parseToffFile,
+  suggestToffFilename,
+  TOFF_EXT,
+} from './storage/ToffFormat';
 
 const project = new Project();
 const library = new AssetLibrary();
@@ -23,9 +38,11 @@ const timeline = new Timeline(timelineRow);
 const ctxMenu = new ContextMenu();
 
 const statusEl = document.getElementById('status')!;
+const activityToggle = document.getElementById('activity-toggle') as HTMLButtonElement;
+const activityLog = document.getElementById('activity-log')!;
+const activityList = document.getElementById('activity-list')!;
 const playBtn = document.getElementById('play-btn')!;
 const stopBtn = document.getElementById('stop-btn')!;
-const recordBtn = document.getElementById('record-btn') as HTMLButtonElement;
 const undoBtn = document.getElementById('undo-btn') as HTMLButtonElement;
 const redoBtn = document.getElementById('redo-btn') as HTMLButtonElement;
 const editMenuBtn = document.getElementById('edit-menu-btn') as HTMLButtonElement;
@@ -39,22 +56,26 @@ const envBtn = document.getElementById('env-btn')!;
 const specToggle = document.getElementById('spec-toggle')!;
 const masterGainInput = document.getElementById('master-gain') as HTMLInputElement;
 const masterGainValue = document.getElementById('master-gain-value')!;
-const clipRateInput = document.getElementById('clip-rate') as HTMLInputElement;
+const masterMeterFill = document.querySelector('#master-meter .meter-fill') as HTMLElement;
 const clipInfo = document.getElementById('clip-info')!;
 const timeDisplay = document.getElementById('time-display')!;
-const exportMenuBtn = document.getElementById('export-menu-btn') as HTMLButtonElement;
+const filesMenuBtn = document.getElementById('files-menu-btn') as HTMLButtonElement;
 const exportPanel = document.getElementById('export-panel') as HTMLDivElement;
 const exportBtn = document.getElementById('export-btn')!;
 const formatSel = document.getElementById('format') as HTMLSelectElement;
 const bitrateSel = document.getElementById('bitrate') as HTMLSelectElement;
 const metaTitle = document.getElementById('meta-title') as HTMLInputElement;
 const metaArtist = document.getElementById('meta-artist') as HTMLInputElement;
+const fxPopover = document.getElementById('fx-popover')!;
+
+function syncLoopToEngine() {
+  const sel = timeline.getTimeSelection();
+  engine.setLoopRegion(timeline.loopEnabled && sel ? sel : null);
+}
 
 function refresh() {
   undoBtn.disabled = !project.canUndo;
   redoBtn.disabled = !project.canRedo;
-  recordBtn.classList.toggle('active', recorder.isRecording);
-  recordBtn.disabled = !project.armedTrackId && !recorder.isRecording;
   editMenuBtn.classList.toggle('active', timeline.mode === 'envelope');
 
   if (!masterGainGesture) {
@@ -67,13 +88,11 @@ function refresh() {
     : null;
 
   if (clip) {
-    clipRateInput.disabled = false;
-    clipRateInput.value = String(clip.rate);
-    const dur = clipDuration(clip);
+    const dur = project.clipDur(clip);
     const asset = library.get(clip.assetId);
-    clipInfo.textContent = `${asset?.name ?? 'Clip'} @ ${clip.start.toFixed(2)}s · ${dur.toFixed(2)}s · ${clip.rate.toFixed(2)}×`;
+    const rate = project.effectiveRate(clip);
+    clipInfo.textContent = `${asset?.name ?? 'Clip'} @ ${clip.start.toFixed(2)}s · ${dur.toFixed(2)}s · ${rate.toFixed(2)}×`;
   } else {
-    clipRateInput.disabled = true;
     clipInfo.textContent = project.tracks.length
       ? 'No clip selected'
       : 'Add a track or drop audio onto the timeline';
@@ -82,24 +101,53 @@ function refresh() {
 
 function syncMixer() {
   engine.syncTrackGains(project);
+  engine.syncTrackFx(project);
   refresh();
 }
 
-timeline.onProjectChange = refresh;
-timeline.onTrackChange = syncMixer;
+timeline.onProjectChange = () => {
+  refresh();
+  scheduleAutosave();
+};
+timeline.onTrackChange = () => {
+  syncMixer();
+  scheduleAutosave();
+};
+timeline.onSelectionChange = () => {
+  syncLoopToEngine();
+  timeline.draw();
+  scheduleAutosave();
+};
+
+let liveClipRaf = 0;
+let pendingLiveKind: 'envelope' | 'timing' | null = null;
+timeline.onClipLiveChange = (kind = 'timing') => {
+  if (!engine.isPlaying) return;
+  // Timing edits need a full reschedule; envelope can soft-update.
+  if (kind === 'timing') pendingLiveKind = 'timing';
+  else if (pendingLiveKind !== 'timing') pendingLiveKind = 'envelope';
+  if (liveClipRaf) return;
+  liveClipRaf = requestAnimationFrame(() => {
+    liveClipRaf = 0;
+    const k = pendingLiveKind;
+    pendingLiveKind = null;
+    if (!engine.isPlaying || !k) return;
+    if (k === 'envelope') engine.updateClipEnvelopes(project);
+    else engine.seek(project, timeline.playhead);
+  });
+};
 
 async function importFile(
   file: File,
   opts: { atTime?: number; trackId?: string | null; createTrack?: boolean } = {}
 ) {
-  const atTime = Math.max(0, opts.atTime ?? timeline.playhead);
-  statusEl.textContent = `Loading ${file.name}…`;
+  setStatus(`Loading ${file.name}…`);
   let buffer: AudioBuffer;
   try {
     buffer = await decodeAudioFile(file);
   } catch (err) {
     console.error(err);
-    statusEl.textContent = `Couldn't decode "${file.name}" — is it a supported audio file?`;
+    setStatus(`Couldn't decode "${file.name}" — is it a supported audio file?`);
     return;
   }
 
@@ -119,6 +167,8 @@ async function importFile(
       ? opts.trackId
       : null;
   const createTrack = opts.createTrack || !existing;
+  // New tracks always place the clip at the start of the timeline.
+  const atTime = createTrack ? 0 : Math.max(0, opts.atTime ?? timeline.playhead);
 
   let clipId: string;
   if (createTrack) {
@@ -151,7 +201,38 @@ async function importFile(
 
 function setStatus(message = '') {
   statusEl.textContent = message;
+  if (!message) return;
+
+  const li = document.createElement('li');
+  const time = document.createElement('span');
+  time.className = 'activity-time';
+  const now = new Date();
+  time.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const text = document.createElement('span');
+  text.textContent = message;
+  li.append(time, text);
+  activityList.prepend(li);
+
+  // Keep the log from growing forever
+  while (activityList.children.length > 40) {
+    activityList.lastElementChild?.remove();
+  }
 }
+
+activityToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const open = activityLog.hasAttribute('hidden');
+  activityLog.hidden = !open;
+  activityToggle.setAttribute('aria-expanded', String(open));
+});
+
+window.addEventListener('pointerdown', (e) => {
+  if (activityLog.hidden) return;
+  const t = e.target as Node;
+  if (activityLog.contains(t) || activityToggle.contains(t)) return;
+  activityLog.hidden = true;
+  activityToggle.setAttribute('aria-expanded', 'false');
+});
 
 function addEmptyTrack() {
   const track = project.createTrack(`Track ${project.tracks.length + 1}`);
@@ -203,7 +284,7 @@ function copyTrackById(trackId: string) {
   if (range) {
     const sliced = project.clips
       .filter((c) => c.trackId === trackId)
-      .map((c) => sliceClipToRange(c, range.start, range.end))
+      .map((c) => sliceClipToRange(c, range.start, range.end, project.trackRate(trackId)))
       .filter((c): c is Clip => c !== null);
     if (sliced.length === 0) {
       setStatus('Selection does not overlap any clips on this track');
@@ -281,6 +362,10 @@ timeline.onSelectChange = (id) => {
 };
 timeline.onImportFiles = async (files, info) => {
   for (const file of files) {
+    if (isToffFile(file)) {
+      await openToffFile(file);
+      return;
+    }
     await importFile(file, {
       atTime: info.time,
       trackId: info.trackId,
@@ -292,6 +377,8 @@ timeline.onImportFiles = async (files, info) => {
 function setPlayingUI(playing: boolean) {
   playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
   playBtn.classList.toggle('active', playing);
+  timeline.followPlayhead = playing;
+  if (playing) timeline.setPlayhead(timeline.playhead);
 }
 
 playBtn.addEventListener('click', () => {
@@ -299,9 +386,16 @@ playBtn.addEventListener('click', () => {
   if (engine.isPlaying) {
     engine.stop();
     setPlayingUI(false);
+    timeline.clearMeters();
+    if (masterMeterFill) masterMeterFill.style.width = '0%';
     return;
   }
-  const from = timeline.playhead >= project.duration ? 0 : timeline.playhead;
+  syncLoopToEngine();
+  let from = timeline.playhead >= project.duration ? 0 : timeline.playhead;
+  const sel = timeline.getTimeSelection();
+  if (timeline.loopEnabled && sel) {
+    if (from < sel.start || from >= sel.end) from = sel.start;
+  }
   engine.play(project, from);
   setPlayingUI(true);
 });
@@ -312,49 +406,45 @@ stopBtn.addEventListener('click', () => {
   }
   engine.stop();
   setPlayingUI(false);
+  timeline.clearMeters();
+  if (masterMeterFill) masterMeterFill.style.width = '0%';
   timeline.setPlayhead(0);
   timeDisplay.textContent = fmt(0);
 });
 
-recordBtn.addEventListener('click', async () => {
+let recStartAt = 0;
+
+timeline.onRecordTrack = (trackId) => {
+  void toggleRecordOnTrack(trackId);
+};
+
+async function toggleRecordOnTrack(trackId: string) {
   if (recorder.isRecording) {
-    await stopRecording();
+    if (timeline.recordingTrackId === trackId) await stopRecording();
     return;
   }
-  if (!project.armedTrackId) {
-    if (project.tracks.length === 0) {
-      const track = project.createTrack('Track 1');
-      project.addTrack(track);
-      project.setArmedTrack(track.id);
-      timeline.setProject(project, library);
-    } else {
-      statusEl.textContent = 'Arm a track (●) before recording';
-      return;
-    }
-  }
+  project.setArmedTrack(trackId);
   try {
     if (project.tracks.length === 0) project.setSampleRate(44100);
-    const startAt = timeline.playhead;
+    recStartAt = timeline.playhead;
     await recorder.start(project.sampleRate);
-    (recordBtn as HTMLButtonElement & { _recStart?: number })._recStart = startAt;
-    recordBtn.classList.add('active');
-    recordBtn.textContent = '⏹ Rec';
-    statusEl.textContent = 'Recording…';
+    timeline.setRecordingTrack(trackId);
+    setStatus('Recording…');
     refresh();
   } catch (err) {
     console.error(err);
-    statusEl.textContent = 'Microphone permission denied or unavailable';
+    project.setArmedTrack(null);
+    setStatus('Microphone permission denied or unavailable');
   }
-});
+}
 
 async function stopRecording() {
-  const startAt =
-    (recordBtn as HTMLButtonElement & { _recStart?: number })._recStart ?? timeline.playhead;
+  const startAt = recStartAt;
+  const trackId = project.armedTrackId;
   const buffer = recorder.stop();
-  recordBtn.classList.remove('active');
-  recordBtn.textContent = '⏺ Record';
-  if (!buffer || !project.armedTrackId) {
-    statusEl.textContent = 'Recording cancelled';
+  timeline.setRecordingTrack(null);
+  if (!buffer || !trackId) {
+    setStatus('Recording cancelled');
     refresh();
     return;
   }
@@ -364,13 +454,7 @@ async function stopRecording() {
   }
   const asset = library.add(`Recording ${new Date().toLocaleTimeString()}`, buf);
   library.computePeaks(asset.id, timeline.zoom);
-  const clip = project.createClip(
-    project.armedTrackId,
-    asset.id,
-    startAt,
-    0,
-    buf.duration
-  );
+  const clip = project.createClip(trackId, asset.id, startAt, 0, buf.duration);
   project.addClip(clip);
   timeline.selectedClipId = clip.id;
   try {
@@ -378,7 +462,8 @@ async function stopRecording() {
   } catch {
     /* ignore */
   }
-  statusEl.textContent = `Recorded ${buf.duration.toFixed(1)}s onto armed track`;
+  const track = project.tracks.find((t) => t.id === trackId);
+  setStatus(`Recorded ${buf.duration.toFixed(1)}s onto ${track?.name ?? 'track'}`);
   refresh();
 }
 
@@ -386,8 +471,18 @@ engine.onUpdate = (t) => {
   if (timeline.isSeekDragging) return;
   timeline.setPlayhead(t);
   timeDisplay.textContent = fmt(t);
+  const levels = engine.getMeterLevels();
+  timeline.setMeterLevels(levels);
+  const master = levels.find((l) => l.id === 'master');
+  if (master && masterMeterFill) {
+    masterMeterFill.style.width = `${Math.min(100, master.peak * 100)}%`;
+  }
 };
-engine.onEnded = () => setPlayingUI(false);
+engine.onEnded = () => {
+  setPlayingUI(false);
+  timeline.clearMeters();
+  if (masterMeterFill) masterMeterFill.style.width = '0%';
+};
 
 let pendingSeek: number | null = null;
 let seekRaf = 0;
@@ -485,6 +580,30 @@ editMenuBtn.addEventListener('click', (e) => {
         id: 'spectrogram',
         label: timeline.showSpectrogram ? 'Waveform view' : 'Spectrogram view',
       },
+      { id: 'sep-snap', label: '', separator: true },
+      {
+        id: 'snap',
+        label: timeline.snapEnabled ? 'Snap to grid ✓' : 'Snap to grid',
+      },
+      {
+        id: 'magnetic',
+        label: timeline.magneticEnabled ? 'Magnetic snap ✓' : 'Magnetic snap',
+      },
+      {
+        id: 'grid-0.1',
+        label: timeline.gridStep === 0.1 ? 'Grid step 0.1s ✓' : 'Grid step 0.1s',
+        disabled: !timeline.snapEnabled,
+      },
+      {
+        id: 'grid-0.5',
+        label: timeline.gridStep === 0.5 ? 'Grid step 0.5s ✓' : 'Grid step 0.5s',
+        disabled: !timeline.snapEnabled,
+      },
+      {
+        id: 'grid-1',
+        label: timeline.gridStep === 1 ? 'Grid step 1s ✓' : 'Grid step 1s',
+        disabled: !timeline.snapEnabled,
+      },
       { id: 'sep3', label: '', separator: true },
       { id: 'clear', label: 'Clear project…' },
     ],
@@ -511,6 +630,31 @@ editMenuBtn.addEventListener('click', (e) => {
         case 'spectrogram':
           specToggle.click();
           break;
+        case 'snap':
+          timeline.setSnapEnabled(!timeline.snapEnabled);
+          refresh();
+          scheduleAutosave();
+          break;
+        case 'magnetic':
+          timeline.setMagneticEnabled(!timeline.magneticEnabled);
+          refresh();
+          scheduleAutosave();
+          break;
+        case 'grid-0.1':
+          timeline.setGridStep(0.1);
+          refresh();
+          scheduleAutosave();
+          break;
+        case 'grid-0.5':
+          timeline.setGridStep(0.5);
+          refresh();
+          scheduleAutosave();
+          break;
+        case 'grid-1':
+          timeline.setGridStep(1);
+          refresh();
+          scheduleAutosave();
+          break;
         case 'clear':
           clearBtn.click();
           break;
@@ -530,7 +674,7 @@ timeline.onContextMenu = ({ clientX, clientY, time, clipId, trackId }) => {
       const clip = project.clips.find((c) => c.id === clipId);
       if (!clip) return false;
       const local = time - clip.start;
-      const dur = clipDuration(clip);
+      const dur = project.clipDur(clip);
       return local > 0.05 && local < dur - 0.05;
     })();
 
@@ -571,7 +715,7 @@ timeline.onContextMenu = ({ clientX, clientY, time, clipId, trackId }) => {
       },
       {
         id: 'remove-track',
-        label: 'Remove track',
+        label: 'Delete track',
         disabled: !hasTrack,
       },
       { id: 'sep2', label: '', separator: true },
@@ -585,6 +729,12 @@ timeline.onContextMenu = ({ clientX, clientY, time, clipId, trackId }) => {
         label: timeline.showSpectrogram ? 'Show waveform' : 'Show spectrogram',
       },
       { id: 'sep3', label: '', separator: true },
+      {
+        id: 'loop',
+        label: timeline.loopEnabled ? 'Disable loop' : 'Loop selection',
+        shortcut: 'L',
+        disabled: !timeline.getTimeSelection(),
+      },
       { id: 'play', label: engine.isPlaying ? 'Pause' : 'Play from here', shortcut: 'Space' },
     ],
     (id) => {
@@ -592,8 +742,8 @@ timeline.onContextMenu = ({ clientX, clientY, time, clipId, trackId }) => {
         case 'split': {
           if (clipId) timeline.selectedClipId = clipId;
           const rightId = timeline.splitAt(time);
-          if (rightId) statusEl.textContent = 'Split clip';
-          else statusEl.textContent = 'Cannot split here';
+          if (rightId) setStatus('Split clip');
+          else setStatus('Cannot split here');
           refresh();
           break;
         }
@@ -602,9 +752,9 @@ timeline.onContextMenu = ({ clientX, clientY, time, clipId, trackId }) => {
           if (!target) break;
           timeline.selectedClipId = target;
           if (project.mergeClipWithNext(target)) {
-            statusEl.textContent = 'Merged with next clip';
+            setStatus('Merged with next clip');
           } else {
-            statusEl.textContent = 'Cannot merge — need abutting same-asset clips on one track';
+            setStatus('Cannot merge — need abutting same-asset clips on one track');
           }
           refresh();
           break;
@@ -614,9 +764,9 @@ timeline.onContextMenu = ({ clientX, clientY, time, clipId, trackId }) => {
           if (!target) break;
           timeline.selectedClipId = target;
           if (project.createCrossfade(target, 0.05)) {
-            statusEl.textContent = 'Crossfade overlap applied (50ms)';
+            setStatus('Crossfade overlap applied (50ms)');
           } else {
-            statusEl.textContent = 'Need a following clip on the same track';
+            setStatus('Need a following clip on the same track');
           }
           refresh();
           break;
@@ -662,6 +812,9 @@ timeline.onContextMenu = ({ clientX, clientY, time, clipId, trackId }) => {
           specToggle.textContent = on ? 'Waveform' : 'Spectrogram';
           break;
         }
+        case 'loop':
+          toggleLoop();
+          break;
         case 'play':
           if (engine.isPlaying) {
             engine.stop();
@@ -685,7 +838,9 @@ clearBtn.addEventListener('click', () => {
   trackClipboard = null;
   focusedTrackId = null;
   timeline.setProject(project, library);
+  applyMasterGain(readStoredMasterGain(), false);
   refresh();
+  scheduleAutosave();
 });
 
 envBtn.addEventListener('click', () => {
@@ -701,49 +856,31 @@ specToggle.addEventListener('click', () => {
   specToggle.textContent = on ? 'Waveform' : 'Spectrogram';
 });
 
-let rateGesture = false;
-function applySelectedClipRate(commit: boolean) {
-  if (!timeline.selectedClipId) return;
-  const raw = parseFloat(clipRateInput.value);
-  if (!Number.isFinite(raw)) return;
-  const rate = Math.max(0.25, Math.min(4, raw));
-
-  if (commit) {
-    if (!rateGesture) project.beginEdit();
-    project.mutateClip(timeline.selectedClipId, { rate });
-    project.commitClip(timeline.selectedClipId);
-    rateGesture = false;
-  } else {
-    if (!rateGesture) {
-      project.beginEdit();
-      rateGesture = true;
-    }
-    project.mutateClip(timeline.selectedClipId, { rate });
-  }
-
-  clipRateInput.value = String(rate);
-  const clip = project.clips.find((c) => c.id === timeline.selectedClipId);
-  if (clip) {
-    const asset = library.get(clip.assetId);
-    const dur = clipDuration(clip);
-    clipInfo.textContent = `${asset?.name ?? 'Clip'} @ ${clip.start.toFixed(2)}s · ${dur.toFixed(2)}s · ${rate.toFixed(2)}×`;
-  }
-  timeline.draw();
-  if (engine.isPlaying) {
-    engine.seek(project, timeline.playhead);
-  }
-}
-
-clipRateInput.addEventListener('pointerdown', () => {
-  if (!timeline.selectedClipId) return;
-  project.beginEdit();
-  rateGesture = true;
-});
-clipRateInput.addEventListener('input', () => applySelectedClipRate(false));
-clipRateInput.addEventListener('change', () => applySelectedClipRate(true));
-
 function updateMasterReadout() {
   masterGainValue.textContent = masterGainInput.value;
+}
+
+const MASTER_GAIN_KEY = 'masterGain';
+
+function readStoredMasterGain(): number {
+  const raw = localStorage.getItem(MASTER_GAIN_KEY);
+  if (raw == null) return 1;
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(0, Math.min(2, n));
+}
+
+function persistMasterGain(gain: number) {
+  localStorage.setItem(MASTER_GAIN_KEY, String(Math.max(0, Math.min(2, gain))));
+}
+
+function applyMasterGain(gain: number, commit = false) {
+  const g = Math.max(0, Math.min(2, gain));
+  project.setMasterGain(g, commit);
+  engine.setMasterGain(g);
+  masterGainInput.value = String(Math.round(g * 100));
+  updateMasterReadout();
+  persistMasterGain(g);
 }
 
 let masterGainGesture = false;
@@ -761,12 +898,348 @@ masterGainInput.addEventListener('input', () => {
     project.setMasterGain(g, false);
   }
   engine.setMasterGain(g);
+  persistMasterGain(g);
 });
 masterGainInput.addEventListener('change', () => {
   masterGainGesture = false;
   updateMasterReadout();
+  persistMasterGain(parseInt(masterGainInput.value, 10) / 100);
 });
-updateMasterReadout();
+applyMasterGain(readStoredMasterGain(), false);
+
+function toggleLoop() {
+  const on = !timeline.loopEnabled;
+  if (on && !timeline.getTimeSelection()) {
+    setStatus('Shift-drag a region on the timeline first, then enable Loop');
+    return;
+  }
+  timeline.setLoopEnabled(on);
+  syncLoopToEngine();
+  refresh();
+  setStatus(on ? 'Loop on' : 'Loop off');
+  scheduleAutosave();
+}
+
+function currentUiFlags(): StoredUiFlags {
+  return {
+    snapEnabled: timeline.snapEnabled,
+    magneticEnabled: timeline.magneticEnabled,
+    gridStep: timeline.gridStep,
+    loopEnabled: timeline.loopEnabled,
+  };
+}
+
+let restoringSession = false;
+let autosaveTimer = 0;
+let autosaveBusy = false;
+let autosaveQueued = false;
+
+function scheduleAutosave() {
+  if (restoringSession) return;
+  window.clearTimeout(autosaveTimer);
+  autosaveTimer = window.setTimeout(() => {
+    void flushAutosave();
+  }, 1500);
+}
+
+async function flushAutosave() {
+  if (restoringSession) return;
+  if (autosaveBusy) {
+    autosaveQueued = true;
+    return;
+  }
+  autosaveBusy = true;
+  try {
+    await saveProject(project.state, library, currentUiFlags());
+  } catch (err) {
+    console.error(err);
+    setStatus('Autosave failed');
+  } finally {
+    autosaveBusy = false;
+    if (autosaveQueued) {
+      autosaveQueued = false;
+      scheduleAutosave();
+    }
+  }
+}
+
+function applyLoadedProject(
+  loaded: { state: import('./types').ProjectState; ui: StoredUiFlags },
+  status: string
+) {
+  engine.stop();
+  setPlayingUI(false);
+  timeline.clearMeters();
+  if (masterMeterFill) masterMeterFill.style.width = '0%';
+  project.loadFresh(
+    loaded.state.tracks,
+    loaded.state.clips,
+    loaded.state.masterGain,
+    loaded.state.metadata,
+    loaded.state.sampleRate
+  );
+  timeline.setSnapEnabled(loaded.ui.snapEnabled);
+  timeline.setMagneticEnabled(loaded.ui.magneticEnabled);
+  timeline.setGridStep(loaded.ui.gridStep);
+  timeline.setLoopEnabled(loaded.ui.loopEnabled);
+  timeline.setProject(project, library);
+  applyMasterGain(readStoredMasterGain(), false);
+  syncLoopToEngine();
+  refresh();
+  setStatus(status);
+  scheduleAutosave();
+}
+
+async function downloadToffFile() {
+  try {
+    if (project.clips.length === 0 && project.tracks.length === 0) {
+      setStatus('Nothing to save — add a track or audio first');
+      return;
+    }
+    setStatus('Building .toff…');
+    const blob = await buildToffBlob(project.state, library, currentUiFlags());
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = suggestToffFilename(project.state);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setStatus(`Downloaded ${suggestToffFilename(project.state)}`);
+  } catch (err) {
+    console.error(err);
+    setStatus('Download .toff failed');
+  }
+}
+
+async function openToffFile(file: File) {
+  try {
+    setStatus(`Opening ${file.name}…`);
+    restoringSession = true;
+    const loaded = await parseToffFile(file, library);
+    restoringSession = false;
+    applyLoadedProject(loaded, `Opened ${file.name}`);
+  } catch (err) {
+    restoringSession = false;
+    console.error(err);
+    setStatus(err instanceof Error ? err.message : 'Could not open .toff file');
+  }
+}
+
+async function clearBrowserSession() {
+  if (
+    !confirm(
+      'Clear the autosaved browser session and empty the current project? Download a .toff first if you need a backup.'
+    )
+  ) {
+    return;
+  }
+  try {
+    engine.stop();
+    setPlayingUI(false);
+    timeline.clearMeters();
+    if (masterMeterFill) masterMeterFill.style.width = '0%';
+    restoringSession = true;
+    await clearSavedProject();
+    project.clear();
+    library.clear();
+    trackClipboard = null;
+    focusedTrackId = null;
+    timeline.setLoopEnabled(false);
+    timeline.setProject(project, library);
+    applyMasterGain(readStoredMasterGain(), false);
+    syncLoopToEngine();
+    refresh();
+    restoringSession = false;
+    setStatus('Browser session cleared');
+  } catch (err) {
+    restoringSession = false;
+    console.error(err);
+    setStatus('Could not clear browser session');
+  }
+}
+
+const toffFileInput = document.createElement('input');
+toffFileInput.type = 'file';
+toffFileInput.accept = `${TOFF_EXT},application/x-toeffe-project`;
+toffFileInput.hidden = true;
+document.body.appendChild(toffFileInput);
+toffFileInput.addEventListener('change', () => {
+  const file = toffFileInput.files?.[0];
+  toffFileInput.value = '';
+  if (file) void openToffFile(file);
+});
+
+function pickToffFile() {
+  toffFileInput.click();
+}
+
+let fxTrackId: string | null = null;
+function closeFxPopover() {
+  fxPopover.hidden = true;
+  fxTrackId = null;
+}
+
+function openFxPopover(trackId: string, anchor: HTMLElement) {
+  const track = project.state.tracks.find((t) => t.id === trackId);
+  if (!track) return;
+  if (fxTrackId && fxTrackId !== trackId) {
+    project.commitClip(fxTrackId);
+  }
+  fxTrackId = trackId;
+  project.beginEdit();
+  const fx = normalizeTrackEffects(track.effects);
+  fxPopover.innerHTML = '';
+  const title = document.createElement('h4');
+  title.textContent = `${track.name} — Effects`;
+  fxPopover.appendChild(title);
+
+  const defaults = defaultTrackEffects();
+
+  const addSlider = (
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    value: number,
+    defaultValue: number,
+    onInput: (v: number) => void
+  ) => {
+    const row = document.createElement('div');
+    row.className = 'fx-row';
+    const lab = document.createElement('span');
+    lab.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
+    input.value = String(value);
+    input.title = 'Double-click to reset';
+    input.addEventListener('input', () => onInput(parseFloat(input.value)));
+    input.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      input.value = String(defaultValue);
+      onInput(defaultValue);
+    });
+    row.append(lab, input);
+    fxPopover.appendChild(row);
+  };
+
+  const patchFx = (partial: Partial<TrackEffects>) => {
+    if (!fxTrackId) return;
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    if (!t) return;
+    const next = normalizeTrackEffects({ ...t.effects, ...partial, eq: { ...t.effects.eq, ...partial.eq }, compressor: { ...t.effects.compressor, ...partial.compressor }, nightcore: { ...t.effects.nightcore, ...partial.nightcore } });
+    project.mutateTrack(fxTrackId, { effects: next });
+    engine.syncTrackFx(project);
+    if (engine.isPlaying && partial.nightcore) {
+      engine.seek(project, timeline.playhead);
+    }
+  };
+
+  addSlider('Low', -12, 12, 0.5, fx.eq.lowGain, defaults.eq.lowGain, (v) => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ eq: { ...cur.eq, lowGain: v } });
+  });
+  addSlider('Mid', -12, 12, 0.5, fx.eq.midGain, defaults.eq.midGain, (v) => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ eq: { ...cur.eq, midGain: v } });
+  });
+  addSlider('High', -12, 12, 0.5, fx.eq.highGain, defaults.eq.highGain, (v) => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ eq: { ...cur.eq, highGain: v } });
+  });
+
+  const compRow = document.createElement('div');
+  compRow.className = 'fx-row';
+  const compLab = document.createElement('label');
+  const compCb = document.createElement('input');
+  compCb.type = 'checkbox';
+  compCb.checked = fx.compressor.enabled;
+  compCb.addEventListener('change', () => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ compressor: { ...cur.compressor, enabled: compCb.checked } });
+  });
+  compLab.append(compCb, document.createTextNode(' Comp'));
+  compRow.append(compLab, document.createElement('span'));
+  fxPopover.appendChild(compRow);
+
+  addSlider('Thresh', -60, 0, 1, fx.compressor.threshold, defaults.compressor.threshold, (v) => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ compressor: { ...cur.compressor, threshold: v } });
+  });
+  addSlider('Ratio', 1, 20, 0.5, fx.compressor.ratio, defaults.compressor.ratio, (v) => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ compressor: { ...cur.compressor, ratio: v } });
+  });
+
+  const ncRow = document.createElement('div');
+  ncRow.className = 'fx-row';
+  const ncLab = document.createElement('label');
+  const ncCb = document.createElement('input');
+  ncCb.type = 'checkbox';
+  ncCb.checked = fx.nightcore.enabled;
+  ncCb.addEventListener('change', () => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ nightcore: { ...cur.nightcore, enabled: ncCb.checked } });
+  });
+  ncLab.append(ncCb, document.createTextNode(' Nightcore'));
+  ncRow.append(ncLab, document.createElement('span'));
+  fxPopover.appendChild(ncRow);
+
+  addSlider('Amount', 1, 1.5, 0.01, fx.nightcore.amount, defaults.nightcore.amount, (v) => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ nightcore: { ...cur.nightcore, amount: v } });
+  });
+
+  const hint = document.createElement('p');
+  hint.className = 'hint';
+  hint.textContent = 'Nightcore speeds & pitches up playback on this track.';
+  fxPopover.appendChild(hint);
+
+  const rect = anchor.getBoundingClientRect();
+  fxPopover.hidden = false;
+  fxPopover.style.left = `${Math.min(rect.left, window.innerWidth - 280)}px`;
+  fxPopover.style.top = `${rect.bottom + 6}px`;
+}
+
+timeline.onEditTrackFx = (trackId, anchor) => {
+  if (fxTrackId === trackId && !fxPopover.hidden) {
+    project.commitClip(fxTrackId);
+    closeFxPopover();
+    return;
+  }
+  openFxPopover(trackId, anchor);
+};
+
+window.addEventListener('pointerdown', (e) => {
+  if (fxPopover.hidden) return;
+  const t = e.target as Node;
+  if (fxPopover.contains(t)) return;
+  if (t instanceof Element && t.closest('.track-fx')) return;
+  if (fxTrackId) project.commitClip(fxTrackId);
+  closeFxPopover();
+});
+
+let nudgeGesture = false;
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    if (nudgeGesture && timeline.selectedClipId) {
+      project.commitClip(timeline.selectedClipId);
+    }
+    nudgeGesture = false;
+  }
+});
 
 window.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
@@ -781,6 +1254,48 @@ window.addEventListener('keydown', (e) => {
   if ((e.key === 'v' || e.key === 'V') && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
     e.preventDefault();
     pasteTrackClipboard();
+    return;
+  }
+
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    e.preventDefault();
+    const dir = e.key === 'ArrowLeft' ? -1 : 1;
+    const step = timeline.nudgeStep(e.altKey);
+    if (e.shiftKey && timeline.selectedClipId) {
+      const clip = project.clips.find((c) => c.id === timeline.selectedClipId);
+      if (clip) {
+        if (!nudgeGesture) {
+          project.beginEdit();
+          nudgeGesture = true;
+        }
+        const next = timeline.snap(Math.max(0, clip.start + dir * step), clip.id, clip.trackId);
+        project.mutateClip(clip.id, { start: next });
+        timeline.draw();
+        refresh();
+      }
+    } else {
+      const t = timeline.snap(Math.max(0, timeline.playhead + dir * step));
+      timeline.setPlayhead(t);
+      timeDisplay.textContent = fmt(t);
+      if (engine.isPlaying) engine.seek(project, t);
+      else timeline.onSeek?.(t);
+    }
+    return;
+  }
+
+  if (e.key === 'Home') {
+    e.preventDefault();
+    timeline.setPlayhead(0);
+    timeDisplay.textContent = fmt(0);
+    if (engine.isPlaying) engine.seek(project, 0);
+    return;
+  }
+  if (e.key === 'End') {
+    e.preventDefault();
+    const t = project.duration;
+    timeline.setPlayhead(t);
+    timeDisplay.textContent = fmt(t);
+    if (engine.isPlaying) engine.seek(project, t);
     return;
   }
 
@@ -801,25 +1316,63 @@ window.addEventListener('keydown', (e) => {
     redoBtn.click();
   } else if (e.key === 'e' || e.key === 'E') {
     envBtn.click();
-  } else if (e.key === 'r' || e.key === 'R') {
-    recordBtn.click();
+  } else if (e.key === 'l' || e.key === 'L') {
+    toggleLoop();
   }
 });
 
 function setExportOpen(open: boolean) {
   exportPanel.hidden = !open;
-  exportMenuBtn.setAttribute('aria-expanded', String(open));
+  filesMenuBtn.setAttribute('aria-expanded', String(open));
+  if (open) filesMenuBtn.setAttribute('aria-haspopup', 'dialog');
+  else filesMenuBtn.setAttribute('aria-haspopup', 'menu');
 }
 
-exportMenuBtn.addEventListener('click', (e) => {
+filesMenuBtn.addEventListener('click', (e) => {
   e.stopPropagation();
-  setExportOpen(exportPanel.hasAttribute('hidden'));
+  if (!exportPanel.hidden) {
+    setExportOpen(false);
+    return;
+  }
+  const rect = filesMenuBtn.getBoundingClientRect();
+  filesMenuBtn.setAttribute('aria-expanded', 'true');
+  ctxMenu.show(
+    rect.left,
+    rect.bottom + 4,
+    [
+      { id: 'download-toff', label: 'Download Project.toff' },
+      { id: 'open-toff', label: 'Open Project.toff' },
+      { id: 'sep-files', label: '', separator: true },
+      { id: 'export', label: 'Export audio…' },
+      { id: 'sep-session', label: '', separator: true },
+      { id: 'clear-session', label: 'Clear browser session…' },
+    ],
+    (id) => {
+      switch (id) {
+        case 'download-toff':
+          void downloadToffFile();
+          break;
+        case 'open-toff':
+          pickToffFile();
+          break;
+        case 'export':
+          setExportOpen(true);
+          break;
+        case 'clear-session':
+          void clearBrowserSession();
+          break;
+      }
+    },
+    () => {
+      if (exportPanel.hidden) filesMenuBtn.setAttribute('aria-expanded', 'false');
+    }
+  );
 });
 
 window.addEventListener('pointerdown', (e) => {
   if (exportPanel.hidden) return;
   const t = e.target as Node;
-  if (!exportPanel.contains(t) && !exportMenuBtn.contains(t)) setExportOpen(false);
+  if (!exportPanel.contains(t) && !filesMenuBtn.contains(t)) setExportOpen(false);
 });
 
 window.addEventListener('keydown', (e) => {
@@ -891,6 +1444,28 @@ themeToggle.addEventListener('click', () => {
 
 timeline.setProject(project, library);
 refresh();
+
+window.addEventListener('pagehide', () => {
+  window.clearTimeout(autosaveTimer);
+  void flushAutosave();
+});
+
+void (async () => {
+  try {
+    if (!(await hasSavedProject())) return;
+    restoringSession = true;
+    const loaded = await loadProject(library);
+    restoringSession = false;
+    if (!loaded) return;
+    const hasContent = loaded.state.tracks.length > 0 || loaded.state.clips.length > 0;
+    if (!hasContent) return;
+    applyLoadedProject(loaded, 'Restored previous session');
+  } catch (err) {
+    restoringSession = false;
+    console.error(err);
+    setStatus('Could not restore previous session');
+  }
+})();
 
 function fmt(s: number): string {
   const m = Math.floor(s / 60);
