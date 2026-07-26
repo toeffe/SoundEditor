@@ -11,6 +11,7 @@ import { ContextMenu } from './ui/ContextMenu';
 import { exportAudio, getFFmpeg } from './export/FFmpegExporter';
 import { type Clip, type Track } from './types';
 import { defaultTrackEffects, normalizeTrackEffects, type TrackEffects } from './audio/TrackEffects';
+import { nightcoreAmount } from './audio/FxChain';
 import {
   clearSavedProject,
   hasSavedProject,
@@ -379,7 +380,11 @@ function setPlayingUI(playing: boolean) {
   playBtn.classList.toggle('active', playing);
   timeline.followPlayhead = playing;
   if (playing) timeline.setPlayhead(timeline.playhead);
+  else scrubSilenced = false;
 }
+
+/** True after we've silenced the engine for an in-progress scrub drag. */
+let scrubSilenced = false;
 
 playBtn.addEventListener('click', () => {
   if (project.clips.length === 0) return;
@@ -486,9 +491,21 @@ engine.onEnded = () => {
 
 let pendingSeek: number | null = null;
 let seekRaf = 0;
-timeline.onSeek = (t) => {
+timeline.onSeek = (t, ended) => {
   timeDisplay.textContent = fmt(t);
-  if (!engine.isPlaying) return;
+  if (!engine.isPlaying) {
+    scrubSilenced = false;
+    return;
+  }
+  // While scrub-dragging: mute once and skip per-frame restarts (they cause clicks/noise).
+  if (!ended && timeline.isSeekDragging) {
+    if (!scrubSilenced) {
+      scrubSilenced = true;
+      engine.silenceForScrub();
+    }
+    return;
+  }
+  scrubSilenced = false;
   pendingSeek = t;
   if (seekRaf) return;
   seekRaf = requestAnimationFrame(() => {
@@ -1131,6 +1148,7 @@ function openFxPopover(trackId: string, anchor: HTMLElement) {
     if (!fxTrackId) return;
     const t = project.state.tracks.find((x) => x.id === fxTrackId);
     if (!t) return;
+    const prevNc = nightcoreAmount(normalizeTrackEffects(t.effects));
     const next = normalizeTrackEffects({
       ...t.effects,
       ...partial,
@@ -1142,8 +1160,15 @@ function openFxPopover(trackId: string, anchor: HTMLElement) {
     });
     project.mutateTrack(fxTrackId, { effects: next });
     engine.syncTrackFx(project);
-    if (engine.isPlaying && partial.nightcore) {
+    if (!engine.isPlaying || !partial.nightcore) return;
+    const nextNc = nightcoreAmount(next);
+    if (prevNc === nextNc) return;
+    // Enable/disable changes the scheduled buffer window — soft reschedule.
+    // Amount tweaks while already on can update playbackRate live (no seek noise).
+    if (prevNc === 1 || nextNc === 1) {
       engine.seek(project, timeline.playhead);
+    } else {
+      engine.setTrackRate(project, fxTrackId);
     }
   };
 
@@ -1277,8 +1302,6 @@ function openFxPopover(trackId: string, anchor: HTMLElement) {
 
   const hint = document.createElement('p');
   hint.className = 'hint';
-  hint.textContent =
-    '~80 Hz = sub weight; ~140 Hz = punchier mid-bass. Voice clarity boosts presence (~3.2 kHz).';
   fxPopover.appendChild(hint);
 
   const rect = anchor.getBoundingClientRect();

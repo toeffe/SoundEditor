@@ -109,7 +109,7 @@ export class Timeline {
   private dragTrackId = '';
   private historyBegun = false;
 
-  onSeek: ((time: number) => void) | null = null;
+  onSeek: ((time: number, ended?: boolean) => void) | null = null;
   onSelectChange: ((id: string | null) => void) | null = null;
   onProjectChange: (() => void) | null = null;
   onTrackChange: (() => void) | null = null;
@@ -903,22 +903,42 @@ export class Timeline {
       meter.appendChild(fill);
       this.meterEls.set(track.id, meter);
 
+      const faderRow = document.createElement('div');
+      faderRow.className = 'track-fader-row';
       const fader = document.createElement('input');
       fader.type = 'range';
       fader.min = '0';
       fader.max = '200';
       fader.value = String(Math.round(track.gain * 100));
-      fader.title = 'Track fader';
+      fader.title = 'Track fader (0–200, 100 = unity) — double-click to reset';
       fader.className = 'track-fader';
+      const faderVal = document.createElement('span');
+      faderVal.className = 'gain-readout track-fader-value';
+      faderVal.setAttribute('aria-live', 'polite');
+      const syncFaderReadout = () => {
+        faderVal.textContent = fader.value;
+      };
+      syncFaderReadout();
+      const applyFader = (pct: number, commit: boolean) => {
+        fader.value = String(pct);
+        syncFaderReadout();
+        this.project?.mutateTrack(track.id, { gain: pct / 100 });
+        this.onTrackChange?.();
+        if (commit) this.onProjectChange?.();
+      };
       fader.addEventListener('pointerdown', () => this.project?.beginEdit());
       fader.addEventListener('input', () => {
-        const g = parseInt(fader.value, 10) / 100;
-        this.project?.mutateTrack(track.id, { gain: g });
-        this.onTrackChange?.();
+        applyFader(parseInt(fader.value, 10), false);
       });
       fader.addEventListener('change', () => {
         this.onProjectChange?.();
       });
+      fader.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        this.project?.beginEdit();
+        applyFader(100, true);
+      });
+      faderRow.append(fader, faderVal);
 
       const speedRow = document.createElement('label');
       speedRow.className = 'track-speed';
@@ -944,7 +964,7 @@ export class Timeline {
       });
       speedRow.appendChild(speed);
 
-      row.append(top, btns, meter, fader, speedRow);
+      row.append(top, btns, meter, faderRow, speedRow);
       this.headersEl.appendChild(row);
     }
 
@@ -1125,7 +1145,7 @@ export class Timeline {
       this.onSelectChange?.(hit.clipId);
     }
     this.setPlayhead(hit.time);
-    this.onSeek?.(hit.time);
+    this.onSeek?.(hit.time, true);
     this.draw();
     this.onContextMenu?.({
       clientX: e.clientX,
@@ -1157,7 +1177,7 @@ export class Timeline {
       this.isDragging = true;
       this.dragType = 'seek';
       this.setPlayhead(time);
-      this.onSeek?.(time);
+      this.onSeek?.(time, false);
       return;
     }
 
@@ -1235,7 +1255,7 @@ export class Timeline {
     if (this.dragType === 'seek') {
       const t = this.snap(Math.max(0, time));
       this.setPlayhead(t);
-      this.onSeek?.(this.playhead);
+      this.onSeek?.(this.playhead, false);
       return;
     }
 
@@ -1340,7 +1360,7 @@ export class Timeline {
       this.project.commitClip(this.dragClipId);
     }
     if (this.isDragging && this.dragType === 'seek') {
-      this.onSeek?.(this.playhead);
+      this.onSeek?.(this.playhead, true);
     }
     this.isDragging = false;
     this.dragType = 'seek';

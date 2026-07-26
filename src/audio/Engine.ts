@@ -42,6 +42,10 @@ export class Engine {
   private loopRegion: TimeSelection | null = null;
   private activeProject: Project | null = null;
   private meterBuf = new Float32Array(2048);
+  /** Bumped to cancel in-flight soft fade / scrub teardown timers. */
+  private transportGen = 0;
+  private static readonly FADE_OUT = 0.012;
+  private static readonly FADE_IN = 0.02;
 
   onUpdate: ((time: number) => void) | null = null;
   onEnded: (() => void) | null = null;
@@ -64,7 +68,7 @@ export class Engine {
       : null;
   }
 
-  play(project: Project, fromTime = 0) {
+  play(project: Project, fromTime = 0, opts?: { fadeIn?: boolean }) {
     if (!this.library) return;
     this.teardown();
     if (this.ctx.state === 'suspended') void this.ctx.resume();
@@ -84,7 +88,16 @@ export class Engine {
     this.playing = true;
 
     this.master = this.ctx.createGain();
-    this.master.gain.value = project.state.masterGain;
+    const targetGain = project.state.masterGain;
+    if (opts?.fadeIn) {
+      this.master.gain.setValueAtTime(0, this.ctx.currentTime);
+      this.master.gain.linearRampToValueAtTime(
+        targetGain,
+        this.ctx.currentTime + Engine.FADE_IN
+      );
+    } else {
+      this.master.gain.value = targetGain;
+    }
 
     this.masterAnalyser = this.ctx.createAnalyser();
     this.masterAnalyser.fftSize = 2048;
@@ -110,7 +123,7 @@ export class Engine {
         t >= this.loopRegion.end
       ) {
         this.onUpdate?.(this.loopRegion.end);
-        this.play(project, this.loopRegion.start);
+        this.play(project, this.loopRegion.start, { fadeIn: true });
         return;
       }
 
@@ -150,7 +163,13 @@ export class Engine {
 
   setMasterGain(gain: number) {
     if (!this.master) return;
-    this.master.gain.setValueAtTime(gain, this.ctx.currentTime);
+    const now = this.ctx.currentTime;
+    try {
+      this.master.gain.cancelAndHoldAtTime(now);
+    } catch {
+      this.master.gain.cancelScheduledValues(now);
+    }
+    this.master.gain.linearRampToValueAtTime(gain, now + 0.01);
   }
 
   syncTrackGains(project: Project) {
@@ -205,6 +224,7 @@ export class Engine {
 
   private finish() {
     if (this.stopping) return;
+    this.transportGen++;
     this.playing = false;
     this.teardown();
     this.onEnded?.();
@@ -415,15 +435,55 @@ export class Engine {
     }
   }
 
+  /**
+   * Fade output out and tear down the graph while keeping transport "playing".
+   * Used while the user scrub-drags so we don't hard-restart sources every frame.
+   */
+  silenceForScrub() {
+    if (!this.playing) return;
+    const token = ++this.transportGen;
+    this.fadeMasterTo(0, Engine.FADE_OUT);
+    window.setTimeout(() => {
+      if (token !== this.transportGen || !this.playing) return;
+      this.teardown();
+    }, Engine.FADE_OUT * 1000 + 2);
+  }
+
   seek(project: Project, time: number) {
     if (!this.playing) return;
-    this.play(project, time);
+    const token = ++this.transportGen;
+    const master = this.master;
+    const needsFade = !!master && master.gain.value > 0.001;
+
+    const restart = () => {
+      if (token !== this.transportGen || !this.playing) return;
+      this.play(project, time, { fadeIn: true });
+    };
+
+    if (needsFade) {
+      this.fadeMasterTo(0, Engine.FADE_OUT);
+      window.setTimeout(restart, Engine.FADE_OUT * 1000 + 2);
+    } else {
+      restart();
+    }
   }
 
   stop() {
+    this.transportGen++;
     this.stopping = true;
     this.playing = false;
     this.teardown();
+  }
+
+  private fadeMasterTo(value: number, seconds: number) {
+    if (!this.master) return;
+    const now = this.ctx.currentTime;
+    try {
+      this.master.gain.cancelAndHoldAtTime(now);
+    } catch {
+      this.master.gain.cancelScheduledValues(now);
+    }
+    this.master.gain.linearRampToValueAtTime(Math.max(0, value), now + seconds);
   }
 
   private teardown() {

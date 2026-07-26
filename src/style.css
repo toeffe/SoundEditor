@@ -613,10 +613,24 @@ input[type="number"] {
   gap: 0.25rem;
 }
 
+.track-fader-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
 .track-fader {
+  flex: 1;
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
+}
+
+.track-fader-value {
+  font-size: 0.7rem;
+  min-width: 1.75rem;
+  color: var(--text-dim);
 }
 
 .track-speed {
@@ -888,6 +902,7 @@ label { font-size: 0.8rem; color: var(--text-dim); display: inline-flex; align-i
   header { flex-direction: column; align-items: stretch; }
   .controls, .toolbar { gap: var(--space-1); }
   input[type="range"] { width: 76px; }
+  .track-fader-row { width: 100%; }
   .track-fader { width: 100%; }
   .export-popover { right: auto; left: 0; }
 }
