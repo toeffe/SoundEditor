@@ -351,6 +351,22 @@ input[type="number"] {
   gap: 0.35rem;
 }
 
+.fx-band {
+  grid-template-columns: 4.5rem 1fr;
+}
+
+.fx-band-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.75rem;
+  font-size: 0.72rem;
+}
+
+.fx-band-options label {
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
 .track-header {
   gap: 0.35rem;
 }

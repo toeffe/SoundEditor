@@ -16,7 +16,9 @@ export interface MeterLevel {
 interface TrackChain {
   input: GainNode;
   gain: GainNode;
+  bass: BiquadFilterNode;
   eq: BiquadFilterNode[];
+  clarity: BiquadFilterNode;
   comp: DynamicsCompressorNode;
   analyser: AnalyserNode;
 }
@@ -125,7 +127,7 @@ export class Engine {
 
   private buildTrackChain(project: Project, track: Track) {
     const fx = normalizeTrackEffects(track.effects);
-    const { input, output, eq, comp } = buildTrackFxChain(this.ctx, fx);
+    const { input, output, bass, eq, clarity, comp } = buildTrackFxChain(this.ctx, fx);
     const gain = this.ctx.createGain();
     gain.gain.value = this.trackGainValue(project, track.id);
     output.connect(gain);
@@ -136,8 +138,8 @@ export class Engine {
     gain.connect(analyser);
     gain.connect(this.master!);
 
-    this.trackChains.set(track.id, { input, gain, eq, comp, analyser });
-    this.nodes.push(input, ...eq, comp, gain, analyser);
+    this.trackChains.set(track.id, { input, gain, bass, eq, clarity, comp, analyser });
+    this.nodes.push(input, bass, ...eq, clarity, comp, gain, analyser);
   }
 
   private trackGainValue(project: Project, trackId: string): number {
@@ -164,7 +166,14 @@ export class Engine {
     for (const track of project.tracks) {
       const chain = this.trackChains.get(track.id);
       if (!chain) continue;
-      applyTrackFxParams(chain.eq, chain.comp, normalizeTrackEffects(track.effects), when);
+      applyTrackFxParams(
+        chain.bass,
+        chain.eq,
+        chain.clarity,
+        chain.comp,
+        normalizeTrackEffects(track.effects),
+        when
+      );
     }
   }
 

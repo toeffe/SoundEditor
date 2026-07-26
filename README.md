@@ -27,8 +27,18 @@ Built with Vite, TypeScript, Web Audio API, and ffmpeg.wasm.
 - Keyboard nudges: arrows (playhead), Shift+arrows (clip), Alt+arrows (fine), Home / End
 
 ### Effects (per track)
-- **FX** button opens EQ (3-band), compressor, and **Nightcore** (rate × pitch)
+Open **FX** on a track header. Effects apply in realtime and on export; they are stored in autosave and `.toff` projects.
+
+| Effect | What it does |
+|--------|----------------|
+| **EQ** | 3-band: Low (lowshelf ~250 Hz), Mid (peaking ~1 kHz), High (highshelf ~4 kHz), each ±12 dB |
+| **Bass boost** | Dedicated peaking boost (separate from EQ Low). Choose **~80 Hz** (sub weight) or **~140 Hz** (punchier mid-bass), gain 0–12 dB |
+| **Voice clarity** | Presence peaking ~3.2 kHz for speech/vocal intelligibility, gain 0–9 dB |
+| **Compressor** | Threshold + ratio (enable to engage) |
+| **Nightcore** | Speeds and pitches up that track (amount 1–1.5×) |
+
 - Double-click an FX slider to reset it to default
+- The **FX** chip lights up when any effect is active on that track
 
 ### Mix & meters
 - Master gain with horizontal peak meter (level remembered in the browser)

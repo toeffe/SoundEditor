@@ -1131,7 +1131,15 @@ function openFxPopover(trackId: string, anchor: HTMLElement) {
     if (!fxTrackId) return;
     const t = project.state.tracks.find((x) => x.id === fxTrackId);
     if (!t) return;
-    const next = normalizeTrackEffects({ ...t.effects, ...partial, eq: { ...t.effects.eq, ...partial.eq }, compressor: { ...t.effects.compressor, ...partial.compressor }, nightcore: { ...t.effects.nightcore, ...partial.nightcore } });
+    const next = normalizeTrackEffects({
+      ...t.effects,
+      ...partial,
+      eq: { ...t.effects.eq, ...partial.eq },
+      bassBoost: { ...t.effects.bassBoost, ...partial.bassBoost },
+      voiceClarity: { ...t.effects.voiceClarity, ...partial.voiceClarity },
+      compressor: { ...t.effects.compressor, ...partial.compressor },
+      nightcore: { ...t.effects.nightcore, ...partial.nightcore },
+    });
     project.mutateTrack(fxTrackId, { effects: next });
     engine.syncTrackFx(project);
     if (engine.isPlaying && partial.nightcore) {
@@ -1153,6 +1161,71 @@ function openFxPopover(trackId: string, anchor: HTMLElement) {
     const t = project.state.tracks.find((x) => x.id === fxTrackId);
     const cur = normalizeTrackEffects(t?.effects);
     patchFx({ eq: { ...cur.eq, highGain: v } });
+  });
+
+  const bassRow = document.createElement('div');
+  bassRow.className = 'fx-row';
+  const bassLab = document.createElement('label');
+  const bassCb = document.createElement('input');
+  bassCb.type = 'checkbox';
+  bassCb.checked = fx.bassBoost.enabled;
+  bassCb.addEventListener('change', () => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ bassBoost: { ...cur.bassBoost, enabled: bassCb.checked } });
+  });
+  bassLab.append(bassCb, document.createTextNode(' Bass boost'));
+  bassRow.append(bassLab, document.createElement('span'));
+  fxPopover.appendChild(bassRow);
+
+  const bandRow = document.createElement('div');
+  bandRow.className = 'fx-row fx-band';
+  const bandWrap = document.createElement('div');
+  bandWrap.className = 'fx-band-options';
+  for (const band of ['80', '140'] as const) {
+    const lab = document.createElement('label');
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = `bass-band-${fxTrackId}`;
+    radio.value = band;
+    radio.checked = fx.bassBoost.band === band;
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      const t = project.state.tracks.find((x) => x.id === fxTrackId);
+      const cur = normalizeTrackEffects(t?.effects);
+      patchFx({ bassBoost: { ...cur.bassBoost, band } });
+    });
+    lab.append(radio, document.createTextNode(` ~${band} Hz`));
+    bandWrap.appendChild(lab);
+  }
+  bandRow.append(document.createElement('span'), bandWrap);
+  fxPopover.appendChild(bandRow);
+
+  addSlider('Bass', 0, 12, 0.5, fx.bassBoost.gain, defaults.bassBoost.gain, (v) => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ bassBoost: { ...cur.bassBoost, gain: v } });
+  });
+
+  const clarityRow = document.createElement('div');
+  clarityRow.className = 'fx-row';
+  const clarityLab = document.createElement('label');
+  const clarityCb = document.createElement('input');
+  clarityCb.type = 'checkbox';
+  clarityCb.checked = fx.voiceClarity.enabled;
+  clarityCb.addEventListener('change', () => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ voiceClarity: { ...cur.voiceClarity, enabled: clarityCb.checked } });
+  });
+  clarityLab.append(clarityCb, document.createTextNode(' Voice clarity'));
+  clarityRow.append(clarityLab, document.createElement('span'));
+  fxPopover.appendChild(clarityRow);
+
+  addSlider('Clarity', 0, 9, 0.5, fx.voiceClarity.gain, defaults.voiceClarity.gain, (v) => {
+    const t = project.state.tracks.find((x) => x.id === fxTrackId);
+    const cur = normalizeTrackEffects(t?.effects);
+    patchFx({ voiceClarity: { ...cur.voiceClarity, gain: v } });
   });
 
   const compRow = document.createElement('div');
@@ -1204,7 +1277,8 @@ function openFxPopover(trackId: string, anchor: HTMLElement) {
 
   const hint = document.createElement('p');
   hint.className = 'hint';
-  hint.textContent = 'Nightcore speeds & pitches up playback on this track.';
+  hint.textContent =
+    '~80 Hz = sub weight; ~140 Hz = punchier mid-bass. Voice clarity boosts presence (~3.2 kHz).';
   fxPopover.appendChild(hint);
 
   const rect = anchor.getBoundingClientRect();

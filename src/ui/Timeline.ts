@@ -877,7 +877,15 @@ export class Timeline {
       fxBtn.className = 'track-chip track-fx';
       fxBtn.title = 'Track effects';
       const fx = normalizeTrackEffects(track.effects);
-      if (fx.compressor.enabled || fx.nightcore.enabled || fx.eq.lowGain || fx.eq.midGain || fx.eq.highGain) {
+      if (
+        fx.compressor.enabled ||
+        fx.nightcore.enabled ||
+        fx.bassBoost.enabled ||
+        fx.voiceClarity.enabled ||
+        fx.eq.lowGain ||
+        fx.eq.midGain ||
+        fx.eq.highGain
+      ) {
         fxBtn.classList.add('on');
       }
       fxBtn.addEventListener('click', (e) => {

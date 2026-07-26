@@ -1,12 +1,41 @@
-import type { TrackEffects } from './TrackEffects';
+import type { BassBoostBand, TrackEffects } from './TrackEffects';
 
-/** Build EQ → compressor chain; returns { input, output }. */
+const BASS_Q = 0.85;
+const CLARITY_FREQ = 3200;
+const CLARITY_Q = 1.1;
+
+export function bassBoostHz(band: BassBoostBand): number {
+  return band === '140' ? 140 : 80;
+}
+
+function bassBoostGainDb(fx: TrackEffects): number {
+  return fx.bassBoost.enabled ? fx.bassBoost.gain : 0;
+}
+
+function voiceClarityGainDb(fx: TrackEffects): number {
+  return fx.voiceClarity.enabled ? fx.voiceClarity.gain : 0;
+}
+
+/** Build bass → EQ → voice clarity → compressor; returns { input, output }. */
 export function buildTrackFxChain(
   ctx: BaseAudioContext,
   fx: TrackEffects
-): { input: GainNode; output: AudioNode; eq: BiquadFilterNode[]; comp: DynamicsCompressorNode } {
+): {
+  input: GainNode;
+  output: AudioNode;
+  bass: BiquadFilterNode;
+  eq: BiquadFilterNode[];
+  clarity: BiquadFilterNode;
+  comp: DynamicsCompressorNode;
+} {
   const input = ctx.createGain();
   input.gain.value = 1;
+
+  const bass = ctx.createBiquadFilter();
+  bass.type = 'peaking';
+  bass.frequency.value = bassBoostHz(fx.bassBoost.band);
+  bass.Q.value = BASS_Q;
+  bass.gain.value = bassBoostGainDb(fx);
 
   const low = ctx.createBiquadFilter();
   low.type = 'lowshelf';
@@ -24,6 +53,12 @@ export function buildTrackFxChain(
   high.frequency.value = 4000;
   high.gain.value = fx.eq.highGain;
 
+  const clarity = ctx.createBiquadFilter();
+  clarity.type = 'peaking';
+  clarity.frequency.value = CLARITY_FREQ;
+  clarity.Q.value = CLARITY_Q;
+  clarity.gain.value = voiceClarityGainDb(fx);
+
   const comp = ctx.createDynamicsCompressor();
   if (fx.compressor.enabled) {
     comp.threshold.value = fx.compressor.threshold;
@@ -40,24 +75,34 @@ export function buildTrackFxChain(
     comp.release.value = 0.25;
   }
 
-  input.connect(low);
+  input.connect(bass);
+  bass.connect(low);
   low.connect(mid);
   mid.connect(high);
-  high.connect(comp);
+  high.connect(clarity);
+  clarity.connect(comp);
 
-  return { input, output: comp, eq: [low, mid, high], comp };
+  return { input, output: comp, bass, eq: [low, mid, high], clarity, comp };
 }
 
 export function applyTrackFxParams(
+  bass: BiquadFilterNode,
   eq: BiquadFilterNode[],
+  clarity: BiquadFilterNode,
   comp: DynamicsCompressorNode,
   fx: TrackEffects,
   when: number
 ) {
   const [low, mid, high] = eq;
+  bass.frequency.setValueAtTime(bassBoostHz(fx.bassBoost.band), when);
+  bass.Q.setValueAtTime(BASS_Q, when);
+  bass.gain.setValueAtTime(bassBoostGainDb(fx), when);
   low.gain.setValueAtTime(fx.eq.lowGain, when);
   mid.gain.setValueAtTime(fx.eq.midGain, when);
   high.gain.setValueAtTime(fx.eq.highGain, when);
+  clarity.frequency.setValueAtTime(CLARITY_FREQ, when);
+  clarity.Q.setValueAtTime(CLARITY_Q, when);
+  clarity.gain.setValueAtTime(voiceClarityGainDb(fx), when);
   if (fx.compressor.enabled) {
     comp.threshold.setValueAtTime(fx.compressor.threshold, when);
     comp.ratio.setValueAtTime(fx.compressor.ratio, when);
