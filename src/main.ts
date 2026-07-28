@@ -1494,7 +1494,15 @@ exportBtn.addEventListener('click', async () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `export.${format}`;
+    const artist = metaArtist.value.trim();
+    const title = metaTitle.value.trim();
+    const base =
+      artist && title
+        ? `${artist} - ${title}`
+        : title || artist || 'export';
+    // Strip characters illegal in filenames
+    const safe = base.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() || 'export';
+    a.download = `${safe}.${format}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
