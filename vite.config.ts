@@ -18,14 +18,12 @@ function copyFfmpegWorkerSiblings(): Plugin {
   return {
     name: 'copy-ffmpeg-worker-siblings',
     closeBundle() {
-      const ffmpegPkg = dirname(require.resolve('@ffmpeg/ffmpeg/package.json'));
-      const esmDir = join(ffmpegPkg, 'dist', 'esm');
+      // worker is an exported subpath; package.json is not.
+      const workerPath = require.resolve('@ffmpeg/ffmpeg/worker');
+      const esmDir = dirname(workerPath); // …/dist/esm
       const outDir = join(dirname(fileURLToPath(import.meta.url)), 'dist', 'assets');
 
-      if (!existsSync(outDir)) {
-        // Nothing to do (e.g. build failed earlier)
-        return;
-      }
+      if (!existsSync(outDir)) return;
       mkdirSync(outDir, { recursive: true });
 
       for (const file of ['const.js', 'errors.js']) {
