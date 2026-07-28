@@ -93,6 +93,7 @@ export async function exportAudio(
   metadata: Record<string, string>
 ): Promise<Blob> {
   // WAV is written in-process — no ffmpeg.wasm needed.
+  // (RIFF INFO tags could be added later; for now metadata is ignored for WAV.)
   if (format === 'wav') {
     return new Blob([audioBufferToWav(buffer)], { type: 'audio/wav' });
   }
@@ -104,11 +105,17 @@ export async function exportAudio(
 
   const args = ['-i', 'input.wav'];
 
-  Object.entries(metadata).forEach(([k, v]) => {
-    if (v) args.push('-metadata', `${k}=${v}`);
-  });
+  // Global metadata (title, artist, …). Keys are case-insensitive for
+  // FLAC/OGG Vorbis comments; for MP3 they become ID3 frames.
+  for (const [k, v] of Object.entries(metadata)) {
+    const value = (v ?? '').trim();
+    if (value) args.push('-metadata', `${k}=${value}`);
+  }
 
   if (format === 'mp3') {
+    // Force ID3v2.3 so Explorer / most players actually show Title & Artist.
+    // Without this, some ffmpeg builds only write ID3v1 (or nothing useful).
+    args.push('-id3v2_version', '3', '-write_id3v2', '1');
     args.push('-c:a', 'libmp3lame', '-b:a', `${bitrate}k`);
   } else if (format === 'ogg') {
     args.push('-c:a', 'libvorbis', '-q:a', '4');
